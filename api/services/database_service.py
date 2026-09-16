@@ -1,7 +1,7 @@
 import os
 import time
 from typing import Dict, List, Any, Optional
-from sqlalchemy import create_engine, MetaData, Table, Column, select, insert
+from sqlalchemy import create_engine, MetaData, Table, Column, select, insert, text
 from sqlalchemy.exc import OperationalError
 from services.config_service import ConfigService
 
@@ -31,7 +31,7 @@ class DatabaseService:
             try:
                 engine = create_engine(connection_string)
                 with engine.connect() as conn:
-                    conn.execute(select(1))
+                    conn.execute(text("SELECT 1"))
                 print(f"Database connection established successfully")
                 return
             except OperationalError as e:
@@ -73,7 +73,7 @@ class DatabaseService:
         print(f"Table '{self.table_name}' created or verified")
 
     def insert_record(self, data: Dict[str, Any]) -> int:
-        if not self.table or not self.engine:
+        if self.table is None or self.engine is None:
             raise Exception("Database not initialized")
 
         with self.engine.connect() as conn:
@@ -82,7 +82,7 @@ class DatabaseService:
             return result.inserted_primary_key[0]
 
     def get_all_records(self, limit: Optional[int] = None, offset: Optional[int] = None) -> List[Dict[str, Any]]:
-        if not self.table or not self.engine:
+        if self.table is None or self.engine is None:
             raise Exception("Database not initialized")
 
         with self.engine.connect() as conn:
@@ -99,7 +99,7 @@ class DatabaseService:
             return [dict(row._mapping) for row in rows]
 
     def get_record_by_id(self, record_id: int) -> Optional[Dict[str, Any]]:
-        if not self.table or not self.engine:
+        if self.table is None or self.engine is None:
             raise Exception("Database not initialized")
 
         with self.engine.connect() as conn:

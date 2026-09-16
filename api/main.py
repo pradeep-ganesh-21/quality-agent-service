@@ -1,6 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
+from sqlalchemy import text
 from services.config_service import ConfigService
 from services.database_service import DatabaseService
 from controllers import quality_agent_controller
@@ -64,7 +65,7 @@ async def health_check():
     try:
         if db_service.engine:
             with db_service.engine.connect() as conn:
-                conn.execute("SELECT 1")
+                conn.execute(text("SELECT 1"))
             return {"status": "healthy", "database": "connected"}
         else:
             return {"status": "unhealthy", "database": "not initialized"}
