@@ -1,0 +1,19 @@
+database:
+  table_name: quality_agent_runs
+  columns:
+    - name: id
+      type: INTEGER
+      primary_key: true
+      auto_increment: true
+    - name: username
+      type: VARCHAR(255)
+      nullable: false
+    - name: github_repo
+      type: VARCHAR(500)
+      nullable: false
+    - name: run_date
+      type: TIMESTAMP
+      nullable: false
+    - name: number_of_issues_found
+      type: INTEGER
+      nullable: false

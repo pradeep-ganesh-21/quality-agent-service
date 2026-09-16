@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.pyc
+
+# Virtual Environment
+venv/
+env/
+ENV/
+
+# Environment variables
+.env
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Database
+*.db
+*.sqlite
+postgres_data/
+
+# Docker
+.dockerignore
+
+# Logs
+*.log
