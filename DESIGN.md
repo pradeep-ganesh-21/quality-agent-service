@@ -583,17 +583,6 @@ Response after the worked lifecycle above, `200 OK`:
       "defect_count": 2,
       "gap_count": 1,
       "contract_ingredient_count": 14
-    },
-    "metadata": {
-      "boundary": "example-service",
-      "recorded_by": {
-        "name": "Example agent",
-        "email": "agent@example.invalid"
-      },
-      "invoked_by": {
-        "name": "Example operator",
-        "email": "operator@example.invalid"
-      }
     }
   }
 ]
@@ -607,7 +596,7 @@ An empty result is a `200 OK` response with this body:
 
 There is no pagination, limit, continuation token, or truncation. Sort by `started_at` descending, then `_id` descending.
 
-Each summary contains this root allowlist and no `runs` field:
+Each summary contains only this root allowlist. Exclude both `metadata` and `runs`:
 
 ```text
 session_id
@@ -618,8 +607,9 @@ status
 completion_time
 last_step_executed
 execution_outcome
-metadata
 ```
+
+Use this allowlist as the MongoDB projection so list requests do not load metadata.
 
 ### `GET /v1/sessions/{session_id}`
 
@@ -679,7 +669,7 @@ Response after the worked lifecycle above, `200 OK`:
 }
 ```
 
-Return `404 session_not_found` for an unknown or malformed ObjectId. Otherwise return the same session root allowlist plus `runs`. A session with no runs contains `"runs": []`.
+Return `404 session_not_found` for an unknown or malformed ObjectId. Otherwise return the same session root allowlist plus `metadata` and `runs`. A session with no runs contains `"runs": []`.
 
 Sort runs by `occurred_at` ascending, then `_id` ascending. Each run contains exactly:
 

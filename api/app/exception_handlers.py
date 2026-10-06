@@ -1,5 +1,5 @@
 from fastapi import FastAPI, Request
-from fastapi.exceptions import RequestValidationError
+from fastapi.exceptions import RequestValidationError, ResponseValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException
 
@@ -68,6 +68,11 @@ def register_exception_handlers(app: FastAPI) -> None:
             status_code=error.status_code,
             headers=error.headers,
         )
+
+    @app.exception_handler(ResponseValidationError)
+    async def invalid_response(request: Request, error: ResponseValidationError) -> JSONResponse:
+        # Stored values in validation errors must not leak into responses or logs.
+        return error_response(ErrorCode.INTERNAL_ERROR)
 
     @app.exception_handler(Exception)
     async def unexpected_error(request: Request, error: Exception) -> JSONResponse:

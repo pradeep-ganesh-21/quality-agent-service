@@ -4,11 +4,31 @@ from fastapi import APIRouter, Depends, Request, status
 
 from app.dependencies import get_session_service
 from app.errors import ApplicationError, ErrorCode
-from app.schemas.sessions import SessionIdResponse
+from app.repositories.protocols import SessionRecord
+from app.schemas.sessions import (
+    SessionDetailResponse,
+    SessionIdResponse,
+    SessionSummaryResponse,
+)
 from app.services.mapping import parse_json_object
 from app.services.session_service import SessionService
 
 router = APIRouter(prefix="/v1/sessions", tags=["sessions"])
+
+
+@router.get("", response_model=list[SessionSummaryResponse])
+async def list_sessions(
+    service: Annotated[SessionService, Depends(get_session_service)],
+) -> list[SessionRecord]:
+    return await service.list_sessions()
+
+
+@router.get("/{session_id}", response_model=SessionDetailResponse)
+async def get_session(
+    session_id: str,
+    service: Annotated[SessionService, Depends(get_session_service)],
+) -> SessionRecord:
+    return await service.get_session(session_id)
 
 
 async def _read_json_body(request: Request) -> dict[str, Any]:

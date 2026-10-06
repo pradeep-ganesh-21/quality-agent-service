@@ -1,9 +1,17 @@
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import (
+    AwareDatetime,
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_serializer,
+    field_validator,
+)
 
-from app.services.mapping import parse_timestamp, validate_execution_outcome
+from app.schemas.runs import RunResponse
+from app.services.mapping import format_timestamp, parse_timestamp, validate_execution_outcome
 
 
 class SessionCreateRequest(BaseModel):
@@ -54,3 +62,24 @@ class SessionIdResponse(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
     session_id: str = Field(pattern=r"^[0-9a-f]{24}$")
+
+
+class SessionSummaryResponse(SessionIdResponse):
+    model_config = ConfigDict(extra="forbid", strict=True, hide_input_in_errors=True)
+
+    schema_version: int
+    started_at: AwareDatetime
+    received_at: AwareDatetime
+    status: Literal["IN_PROGRESS", "COMPLETED", "FAILED"]
+    completion_time: AwareDatetime | None
+    last_step_executed: list[str]
+    execution_outcome: dict[str, Any] | None
+
+    @field_serializer("started_at", "received_at", "completion_time", when_used="json")
+    def serialize_timestamp(self, value: datetime | None) -> str | None:
+        return None if value is None else format_timestamp(value)
+
+
+class SessionDetailResponse(SessionSummaryResponse):
+    metadata: dict[str, Any]
+    runs: list[RunResponse]

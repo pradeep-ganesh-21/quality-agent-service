@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager
+from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 
@@ -12,7 +13,7 @@ def test_health_is_liveness_and_framework_errors_are_preserved(monkeypatch):
     @asynccontextmanager
     async def fake_runtime(uri, database_name):
         events.append("startup")
-        yield
+        yield SimpleNamespace(sessions=None, runs=None)
         events.append("shutdown")
 
     monkeypatch.setattr("app.main.mongo_runtime", fake_runtime)

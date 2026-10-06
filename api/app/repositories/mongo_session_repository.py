@@ -11,6 +11,26 @@ from pymongo.write_concern import WriteConcern
 
 from app.domain import SessionStatus
 from app.errors import ApplicationError, ErrorCode
+from app.repositories.mongo_read_errors import translate_read_errors
+from app.repositories.protocols import SessionRecord
+
+_SESSION_SUMMARY_PROJECTION = {
+    "_id": 1,
+    "schema_version": 1,
+    "started_at": 1,
+    "received_at": 1,
+    "status": 1,
+    "completion_time": 1,
+    "last_step_executed": 1,
+    "execution_outcome": 1,
+}
+_SESSION_DETAIL_PROJECTION = {**_SESSION_SUMMARY_PROJECTION, "metadata": 1}
+
+
+def _session_record(document: dict[str, Any]) -> SessionRecord:
+    record = dict(document)
+    record["session_id"] = str(record.pop("_id"))
+    return record
 
 
 @contextmanager
@@ -40,6 +60,25 @@ class MongoSessionRepository:
         with _translate_mongo_errors():
             result = await self._collection.insert_one(document)
         return str(result.inserted_id)
+
+    async def get(self, session_id: str) -> SessionRecord | None:
+        try:
+            object_id = ObjectId(session_id)
+        except (InvalidId, TypeError):
+            return None
+        with translate_read_errors():
+            document = await self._collection.find_one(
+                {"_id": object_id}, _SESSION_DETAIL_PROJECTION
+            )
+        return None if document is None else _session_record(document)
+
+    async def list_all(self) -> list[SessionRecord]:
+        with translate_read_errors():
+            async with self._collection.find({}, _SESSION_SUMMARY_PROJECTION).sort(
+                [("started_at", -1), ("_id", -1)]
+            ) as cursor:
+                documents = await cursor.to_list(length=None)
+        return [_session_record(document) for document in documents]
 
     async def patch_open_session(
         self,

@@ -15,8 +15,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         configuration = settings if settings is not None else Settings()
         async with mongo_runtime(
             configuration.mongo_uri.get_secret_value(), configuration.mongo_db_name
-        ) as session_repository:
-            app.state.session_repository = session_repository
+        ) as repositories:
+            app.state.session_repository = repositories.sessions
+            app.state.run_repository = repositories.runs
             yield
 
     app = FastAPI(

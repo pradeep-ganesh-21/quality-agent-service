@@ -6,7 +6,7 @@ from pydantic import ValidationError
 
 from app.domain import SessionStatus
 from app.errors import ApplicationError, ErrorCode
-from app.repositories.protocols import SessionRepository
+from app.repositories.protocols import RunRepository, SessionRecord, SessionRepository
 from app.schemas.sessions import SessionCreateRequest, SessionPatchRequest
 from app.services.mapping import (
     SESSION_CREATE_CONSUMED_FIELDS,
@@ -20,8 +20,19 @@ from app.services.mapping import (
 
 
 class SessionService:
-    def __init__(self, repository: SessionRepository) -> None:
+    def __init__(self, repository: SessionRepository, runs: RunRepository) -> None:
         self._repository = repository
+        self._runs = runs
+
+    async def list_sessions(self) -> list[SessionRecord]:
+        return await self._repository.list_all()
+
+    async def get_session(self, session_id: str) -> SessionRecord:
+        session = await self._repository.get(session_id)
+        if session is None:
+            raise ApplicationError(ErrorCode.SESSION_NOT_FOUND)
+        runs = await self._runs.list_for_session(session["session_id"])
+        return {**session, "runs": runs}
 
     async def create_session(self, body: dict[str, Any]) -> str:
         validate_json_values(body)

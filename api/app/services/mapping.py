@@ -107,6 +107,10 @@ def utc_milliseconds(value: datetime) -> datetime:
     return value.replace(microsecond=(value.microsecond // 1000) * 1000)
 
 
+def format_timestamp(value: datetime) -> str:
+    return utc_milliseconds(value).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
 def parse_timestamp(value: Any) -> datetime:
     if not isinstance(value, str) or _RFC3339.fullmatch(value) is None:
         raise ValueError("Timestamp must be an offset-aware RFC 3339 string.")
