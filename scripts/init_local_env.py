@@ -20,7 +20,6 @@ def main() -> None:
             f"mongodb://quality_agent_app:{quote(app_password, safe='')}"
             "@mongo:27017/quality_agent?authSource=quality_agent"
         ),
-        "API_BASE_URL": "http://api:8000",
     }
     try:
         descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)

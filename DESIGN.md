@@ -59,7 +59,6 @@ web/
     app/
       __init__.py
       main.py
-      config.py
       errors.py
       routes.py
     tests/
@@ -838,7 +837,6 @@ web/
     app/
       __init__.py
       main.py
-      config.py
       errors.py
       routes.py
     tests/
@@ -850,7 +848,7 @@ web/
 
 The webserver runs FastAPI and Uvicorn on container port 8080. It serves the built React files and exposes the existing internal `GET /healthz` liveness route. It has no API client, MongoDB client, upstream API URL, relay route, response mapping, retry, cache, authentication, or aggregation behavior.
 
-Keep `web/server/app/config.py` only for local webserver settings when needed, such as `LOG_LEVEL`. Do not add API client settings or new runtime configuration knobs. Remove any remaining upstream HTTPX client, `API_BASE_URL`, timeout settings, and related runtime dependencies or environment entries when aligning the web implementation. Do not introduce relay routes. This documentation change does not perform that code cleanup.
+Add `web/server/app/config.py` only when local webserver settings, such as `LOG_LEVEL`, need it. Do not retain an empty settings module or add new runtime configuration knobs. HTTPX belongs only in test dependencies for the in-process test client. The web runtime has no upstream HTTPX client, `API_BASE_URL`, upstream timeout settings, or relay routes.
 
 The API accepts an inbound `X-Request-ID` only when it is a canonical 36-character UUID string. Otherwise it generates a UUID. The API echoes the selected value in the response `X-Request-ID` header. Treat it as observability data, never identity. NGINX forwards the request header normally. The browser may omit the header or provide it for correlation.
 

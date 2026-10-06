@@ -60,11 +60,6 @@ services:
       context: ./web
       target: runtime
     restart: unless-stopped
-    environment:
-      API_BASE_URL: ${API_BASE_URL:-http://api:8000}
-    depends_on:
-      api:
-        condition: service_healthy
     networks: [app]
     healthcheck:
       test:
