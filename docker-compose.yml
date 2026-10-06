@@ -1,0 +1,110 @@
+name: quality-agent-poc
+
+services:
+  mongo:
+    image: mongo:8.0
+    restart: unless-stopped
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_INITDB_ROOT_USERNAME:?Set MongoDB root username}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_INITDB_ROOT_PASSWORD:?Set MongoDB root password}
+      MONGO_APP_USERNAME: ${MONGO_APP_USERNAME:?Set MongoDB application username}
+      MONGO_APP_PASSWORD: ${MONGO_APP_PASSWORD:?Set MongoDB application password}
+      MONGO_DB_NAME: ${MONGO_DB_NAME:-quality_agent}
+    volumes:
+      - mongo_data:/data/db
+      - ./mongo/init-app-user.js:/docker-entrypoint-initdb.d/init-app-user.js:ro
+    networks: [app]
+    healthcheck:
+      test:
+        - CMD
+        - mongosh
+        - --quiet
+        - --eval
+        - >-
+          const admin = db.getSiblingDB('admin');
+          admin.auth(process.env.MONGO_INITDB_ROOT_USERNAME, process.env.MONGO_INITDB_ROOT_PASSWORD);
+          if (admin.runCommand({ping: 1}).ok !== 1) quit(1);
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  api:
+    build:
+      context: ./api
+      target: runtime
+    restart: unless-stopped
+    environment:
+      MONGO_URI: ${MONGO_URI:?Set a credentialed MongoDB application URI}
+      MONGO_DB_NAME: ${MONGO_DB_NAME:-quality_agent}
+    depends_on:
+      mongo:
+        condition: service_healthy
+    networks: [app]
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import json, urllib.request;
+          response = urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=2);
+          assert response.status == 200 and json.load(response) == {'status': 'ok'}
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 15s
+
+  web:
+    build:
+      context: ./web
+      target: runtime
+    restart: unless-stopped
+    environment:
+      API_BASE_URL: ${API_BASE_URL:-http://api:8000}
+    depends_on:
+      api:
+        condition: service_healthy
+    networks: [app]
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import json, urllib.request;
+          response = urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=2);
+          assert response.status == 200 and json.load(response) == {'status': 'ok'}
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+
+  nginx:
+    image: nginx:1.29-alpine
+    restart: unless-stopped
+    ports:
+      - "0.0.0.0:8080:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      api:
+        condition: service_healthy
+      web:
+        condition: service_healthy
+    networks: [app]
+    healthcheck:
+      # The public health route must remain 404; probe that response, not a new route.
+      test:
+        - CMD-SHELL
+        - test "$$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 2 http://127.0.0.1/healthz)" = 404
+      interval: 5s
+      timeout: 3s
+      retries: 6
+      start_period: 5s
+
+networks:
+  app:
+
+volumes:
+  mongo_data:
