@@ -16,6 +16,8 @@ ERROR_RESPONSES = {
     ErrorCode.NON_FINITE_NUMBER: (400, "Numbers must be finite."),
     ErrorCode.VALUE_OUT_OF_RANGE: (400, "An integer is outside the supported range."),
     ErrorCode.ROUTE_NOT_FOUND: (404, "Route not found."),
+    ErrorCode.SESSION_NOT_FOUND: (404, "Session not found."),
+    ErrorCode.SESSION_NOT_OPEN: (409, "Session is not open for updates."),
     ErrorCode.METHOD_NOT_ALLOWED: (405, "Method not allowed."),
     ErrorCode.DOCUMENT_TOO_LARGE: (
         413, "The stored document would exceed the MongoDB size limit."

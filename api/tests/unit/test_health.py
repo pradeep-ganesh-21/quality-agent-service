@@ -6,7 +6,7 @@ from app.config import Settings
 from app.main import create_app
 
 
-def test_health_is_liveness_and_other_routes_are_not_implemented(monkeypatch):
+def test_health_is_liveness_and_framework_errors_are_preserved(monkeypatch):
     events = []
 
     @asynccontextmanager
@@ -23,8 +23,6 @@ def test_health_is_liveness_and_other_routes_are_not_implemented(monkeypatch):
             assert response.status_code == 200
             assert response.json() == {"status": "ok"}
         assert events == ["startup"]
-        assert client.get("/v1/sessions").status_code == 404
-        assert client.post("/v1/sessions", json={}).status_code == 404
         assert client.get("/docs").status_code == 404
         assert client.get("/unknown").json() == {
             "error": {"code": "route_not_found", "message": "Route not found."}

@@ -12,6 +12,8 @@ class ErrorCode(StrEnum):
     NON_FINITE_NUMBER = "non_finite_number"
     VALUE_OUT_OF_RANGE = "value_out_of_range"
     ROUTE_NOT_FOUND = "route_not_found"
+    SESSION_NOT_FOUND = "session_not_found"
+    SESSION_NOT_OPEN = "session_not_open"
     METHOD_NOT_ALLOWED = "method_not_allowed"
     DOCUMENT_TOO_LARGE = "document_too_large"
     UNSUPPORTED_MEDIA_TYPE = "unsupported_media_type"

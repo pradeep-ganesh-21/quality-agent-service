@@ -7,10 +7,12 @@ from pydantic import ValidationError
 from app.domain import SessionStatus
 from app.errors import ApplicationError, ErrorCode
 from app.repositories.protocols import SessionRepository
-from app.schemas.sessions import SessionCreateRequest
+from app.schemas.sessions import SessionCreateRequest, SessionPatchRequest
 from app.services.mapping import (
     SESSION_CREATE_CONSUMED_FIELDS,
     SESSION_CREATE_RESERVED_FIELDS,
+    SESSION_PATCH_CONSUMED_FIELDS,
+    SESSION_PATCH_RESERVED_FIELDS,
     utc_milliseconds,
     validate_document_depth,
     validate_json_values,
@@ -55,3 +57,34 @@ class SessionService:
         # Validate depth before a recursive copy; deeply nested input is rejected.
         document["metadata"] = deepcopy(metadata)
         return await self._repository.create(document)
+
+    async def patch_session(self, session_id: str, body: dict[str, Any]) -> str:
+        validate_json_values(body)
+        if SESSION_PATCH_RESERVED_FIELDS.intersection(body):
+            raise ApplicationError(ErrorCode.FORBIDDEN_FIELD)
+        try:
+            request = SessionPatchRequest.model_validate(body)
+        except ValidationError:
+            raise ApplicationError(ErrorCode.INVALID_FIELD) from None
+
+        known_input = {
+            key: value
+            for key, value in body.items()
+            if key in SESSION_PATCH_CONSUMED_FIELDS
+        }
+        extras = {
+            key: value
+            for key, value in body.items()
+            if key not in SESSION_PATCH_CONSUMED_FIELDS
+        }
+        # Shallow replacement cannot deepen retained data; check incoming values
+        # at their stored positions before copying or serializing nested values.
+        validate_document_depth({**known_input, "metadata": extras})
+        known = request.model_dump(
+            mode="python",
+            exclude_unset=True,
+            include=set(SESSION_PATCH_CONSUMED_FIELDS),
+        )
+        return await self._repository.patch_open_session(
+            session_id, known, deepcopy(extras)
+        )

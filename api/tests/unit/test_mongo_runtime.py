@@ -11,6 +11,7 @@ from app.repositories import mongo_runtime as runtime_module
 def test_mongo_runtime_pings_indexes_and_closes(monkeypatch, fail_startup):
     events = []
     database = object()
+    repository = object()
 
     class Client:
         admin = None
@@ -41,11 +42,17 @@ def test_mongo_runtime_pings_indexes_and_closes(monkeypatch, fail_startup):
         assert value is database
         events.append("indexes")
 
+    def create_repository(value):
+        assert value is database
+        return repository
+
     monkeypatch.setattr(runtime_module, "AsyncMongoClient", Client)
     monkeypatch.setattr(runtime_module, "ensure_indexes", ensure_indexes)
+    monkeypatch.setattr(runtime_module, "MongoSessionRepository", create_repository)
 
     async def exercise():
-        async with runtime_module.mongo_runtime("mongodb://unit-test.invalid", "unit"):
+        async with runtime_module.mongo_runtime("mongodb://unit-test.invalid", "unit") as result:
+            assert result is repository
             events.append("running")
 
     if fail_startup:
