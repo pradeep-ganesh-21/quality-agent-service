@@ -6,10 +6,12 @@ from pymongo import AsyncMongoClient
 from pymongo.errors import PyMongoError
 
 from app.repositories.indexes import ensure_indexes
+from app.repositories.mongo_session_repository import MongoSessionRepository
+from app.repositories.protocols import SessionRepository
 
 
 @asynccontextmanager
-async def mongo_runtime(uri: str, database_name: str) -> AsyncIterator[None]:
+async def mongo_runtime(uri: str, database_name: str) -> AsyncIterator[SessionRepository]:
     client = AsyncMongoClient(
         uri,
         tz_aware=True,
@@ -25,6 +27,6 @@ async def mongo_runtime(uri: str, database_name: str) -> AsyncIterator[None]:
             raise RuntimeError(
                 "MongoDB startup failed; check availability, credentials, and indexes."
             ) from None
-        yield
+        yield MongoSessionRepository(client[database_name])
     finally:
         await client.close()
