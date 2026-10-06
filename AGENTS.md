@@ -36,8 +36,9 @@ Do not edit the legacy sample, schema draft, requirements prose, or architecture
 - Override FastAPI request validation to `400`. Preserve Starlette HTTP exception status and the `Allow` header on `405`.
 - Keep reads unbounded and use two detail queries. Do not add pagination, hidden limits, `$lookup`, or snapshot claims.
 - Allow run insertion after a parent becomes terminal. Only session patch is status-guarded.
-- Browser code calls only relative `/ui/api/*` paths. It never calls `/v1` directly.
-- The Python BFF passes API JSON through. It adds no business logic, retries, caching, authentication, or aggregation.
+- Browser code calls only relative `/v1/sessions` and `/v1/sessions/{session_id}` paths through NGINX. It never uses the Docker hostname `api`, its internal port, `API_BASE_URL`, or `/ui/api/*`.
+- The Python webserver serves built React assets and internal liveness only. It has no API or MongoDB client, BFF data routes, server rendering, retries, caching, authentication, or aggregation.
+- Keep list responses to the eight root fields in DESIGN.md. Exclude both `metadata` and `runs` from the MongoDB list projection and response. Return them only from session detail.
 - Serve the SPA only for `/` and `/sessions/{session_id}`. Unknown routes and missing assets return `404`.
 - NGINX is the only host-published service at `0.0.0.0:8080:80`. Keep HTTP only.
 - Set `client_max_body_size 0`. Do not add an application request size cap.
@@ -51,6 +52,6 @@ Do not edit the legacy sample, schema draft, requirements prose, or architecture
 
 ## Before reporting completion
 
-Check the implementation against the endpoint, error, index, BFF, deployment, and test contracts in DESIGN.md. Run only commands that the repository now implements. State which commands ran and which did not.
+Check the implementation against the endpoint, error, index, web/browser, deployment, and test contracts in DESIGN.md. Run only commands that the repository now implements. State which commands ran and which did not.
 
 Do not claim a live MongoDB integration test, composed smoke test, package lock, or production behavior without evidence from the current worktree and test output.

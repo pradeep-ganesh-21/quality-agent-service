@@ -6,7 +6,7 @@ This document is the executable specification for coding agents that build the q
 
 The existing `requirements.txt` is a prose problem statement, not a Python dependency file. The existing `run.json` is a legacy aggregate example. `Mongo Schema.txt` is a stale, non-JSON draft. `quality-agent-architecture.drawio` describes a production direction. `noc-agent.drawio` is also legacy context. Keep all five files unchanged.
 
-This document supersedes those sources when they conflict. It does not claim that the API, browser app, deployment files, commands, or tests already exist. Everything described here is to be built.
+This document supersedes those sources when they conflict. It defines the target POC contract. The presence of a file or scaffold in the worktree does not establish that it conforms to this contract.
 
 Build toward this complete repository shape. Files listed here are planned outputs, not current implementation claims:
 
@@ -94,9 +94,10 @@ Build these capabilities:
 - Accept session creation, run creation, and open-session partial updates.
 - List sessions and return one session with its runs.
 - Render session lists and details in a client-side React application.
-- Put a Python FastAPI webserver BFF between the browser and the API.
+- Serve the built React application from a Python FastAPI webserver.
+- Let React call the API directly through NGINX with same-origin relative URLs.
 - Route public traffic through NGINX.
-- Supply automated tests for validation, persistence, concurrency, the BFF, the UI, and the composed HTTP path.
+- Supply automated tests for validation, persistence, concurrency, the static webserver, the UI, and the composed HTTP path.
 
 Do not add the following:
 
@@ -121,18 +122,22 @@ The request paths are:
 
 ```text
 quality agent -> NGINX /v1/* -> API -> MongoDB
-browser -> NGINX /* -> web BFF -> API -> MongoDB
-browser -> NGINX /ui/api/* -> web BFF -> API -> MongoDB
+browser -> NGINX /* -> web -> built React HTML, JavaScript, and CSS
+React in browser -> NGINX /v1/* -> API -> MongoDB
 ```
 
-The browser fetches only relative BFF URLs:
+React fetches only these relative API paths:
 
 ```text
-/ui/api/sessions
-/ui/api/sessions/{session_id}
+/v1/sessions
+/v1/sessions/{session_id}
 ```
 
-The BFF calls `http://api:8000/v1/...`. It does not aggregate counts, reinterpret fields, cache responses, or retry requests. Quality agents call the public `/v1/*` endpoints through NGINX. The BFF is a presentation boundary, not a security boundary. The same-origin API remains publicly reachable at `/v1/*`.
+NGINX sends `/v1/*` to the API on container port 8000. It sends UI and asset requests to the web container on port 8080. The web container serves static React assets and its internal liveness route only. It does not call the API or MongoDB.
+
+The UI and API share the NGINX origin, so browser reads require no CORS configuration. The absence of CORS is not a security control. The unauthenticated `/v1/*` endpoints are public to every host that can reach NGINX.
+
+Direct browser calls are the smaller POC design because the UI needs no server-held API credentials, response aggregation, or view-model transformation. Do not add a BFF, server rendering, or `/ui/api/*` data routes. Do not use the Docker hostname `api`, hardcode its internal port, or introduce `API_BASE_URL` in browser code.
 
 React renders JSON in the browser. There is no SSR. Node 22 is used only in a multistage image build for the Vite bundle. The final `web` image runs Python, FastAPI, and Uvicorn. It contains the built static assets but no Node runtime.
 
@@ -150,11 +155,11 @@ React renders JSON in the browser. There is no SSR. Node 22 is used only in a mu
 | Initial outcome | Incomplete draft values | `execution_outcome: null`, never fake zeros |
 | Run timestamp | `at` in the sample | `occurred_at` on storage and response; `at` accepted only as an input alias |
 
-The production diagram already permits Web to API communication. The POC makes the React SPA and Python BFF concrete, so the BFF is not necessarily a production deviation.
+The diagram now shows the same direct React-to-API data path as the POC. Its other production assumptions remain context only; the POC differences above govern implementation.
 
 ## 4. API code structure and dependency direction
 
-Use Python 3.12, FastAPI, Pydantic v2, Uvicorn, and the official PyMongo `AsyncMongoClient`. Use PyMongo `>=4.15,<5` initially, then lock an exact compatible version during implementation. Lock exact compatible versions for FastAPI, Pydantic v2, Uvicorn, and HTTPX as part of implementation. Do not claim compatibility until the lock and tests exist.
+Use Python 3.12, FastAPI, Pydantic v2, Uvicorn, and the official PyMongo `AsyncMongoClient`. Use PyMongo `>=4.15,<5` initially, then lock an exact compatible version during implementation. Lock exact compatible versions for FastAPI, Pydantic v2, and Uvicorn as part of implementation. HTTPX is allowed as a test dependency for in-process ASGI tests. Neither runtime application uses it to call another service. Do not claim compatibility until the lock and tests exist.
 
 Use these dependencies:
 
@@ -689,7 +694,7 @@ Use two queries: one for the session and one for its runs. Do not use `$lookup` 
 
 The two reads are not a snapshot. A run can be inserted after the session query, after terminal completion, or after a detail response. This is deliberate.
 
-Both read endpoints are unbounded. They can consume significant API, BFF, browser, and network memory. Do not add implicit limits or hide omitted results.
+Both read endpoints are unbounded. They can consume significant API, browser, and network memory. Do not add implicit limits or hide omitted results.
 
 ## 9. Errors and HTTP binding
 
@@ -729,8 +734,6 @@ Use these codes where applicable:
 | 413 | `document_too_large` | `The stored document would exceed the MongoDB size limit.` | Insert or update exceeds final BSON document size |
 | 415 | `unsupported_media_type` | `Content-Type must be application/json.` | Request media type is not JSON |
 | 500 | `internal_error` | `The server could not complete the request.` | Sanitized unexpected server or database failure |
-| 502 | `upstream_unavailable` | `The upstream API is unavailable.` | BFF transport failure, malformed JSON, or upstream `5xx` |
-| 504 | `upstream_timeout` | `The upstream API timed out.` | BFF HTTPX timeout |
 
 Override FastAPI `RequestValidationError` to `400`, mapped to a stable application envelope. Choose `missing_field` when the first deterministic validation issue is an absent required field. Use `invalid_field` for other model validation failures.
 
@@ -793,28 +796,6 @@ Representative errors:
 }
 ```
 
-`502 Bad Gateway` from the BFF:
-
-```json
-{
-  "error": {
-    "code": "upstream_unavailable",
-    "message": "The upstream API is unavailable."
-  }
-}
-```
-
-`504 Gateway Timeout` from the BFF:
-
-```json
-{
-  "error": {
-    "code": "upstream_timeout",
-    "message": "The upstream API timed out."
-  }
-}
-```
-
 Catch MongoDB and BSON exceptions in this order:
 
 1. `pymongo.errors.DocumentTooLarge` to `413 document_too_large`
@@ -846,7 +827,7 @@ MongoDB supplies the unique `_id` indexes. Do not add indexes on extras, agent I
 
 An index definition change requires a deliberate migration or a new name. Startup must not automatically drop or replace an existing index.
 
-## 11. Web BFF and React application
+## 11. Static web server and React application
 
 Use separate Python packaging for the webserver so `api/app` and `web/server/app` do not collide on import paths:
 
@@ -867,50 +848,13 @@ web/
     tests/
 ```
 
-The webserver runs FastAPI and Uvicorn on container port 8080. Its lifespan creates one `httpx.AsyncClient` with this default configuration:
+The webserver runs FastAPI and Uvicorn on container port 8080. It serves the built React files and exposes the existing internal `GET /healthz` liveness route. It has no API client, MongoDB client, upstream API URL, relay route, response mapping, retry, cache, authentication, or aggregation behavior.
 
-```text
-base URL: http://api:8000
-connect timeout: 5 seconds
-read timeout: 30 seconds
-write timeout: 30 seconds
-pool timeout: 5 seconds
-```
+Keep `web/server/app/config.py` only for local webserver settings when needed, such as `LOG_LEVEL`. Do not add API client settings or new runtime configuration knobs. Remove any remaining upstream HTTPX client, `API_BASE_URL`, timeout settings, and related runtime dependencies or environment entries when aligning the web implementation. Do not introduce relay routes. This documentation change does not perform that code cleanup.
 
-Close the client at shutdown. Register API and health routes before static assets and UI fallback routes.
+The API accepts an inbound `X-Request-ID` only when it is a canonical 36-character UUID string. Otherwise it generates a UUID. The API echoes the selected value in the response `X-Request-ID` header. Treat it as observability data, never identity. NGINX forwards the request header normally. The browser may omit the header or provide it for correlation.
 
-Map BFF GET routes one-to-one:
-
-```text
-GET /ui/api/sessions              -> GET /v1/sessions
-GET /ui/api/sessions/{session_id} -> GET /v1/sessions/{session_id}
-```
-
-Pass upstream JSON payloads through without changing response field names. Pass upstream `4xx` status and error envelope through. Map failures as follows:
-
-| Failure | BFF result |
-| --- | --- |
-| `httpx.TimeoutException` | `504 upstream_timeout` |
-| Connection or transport failure | `502 upstream_unavailable` |
-| Upstream `5xx` | `502 upstream_unavailable` |
-| Malformed upstream JSON | `502 upstream_unavailable` |
-
-Use the same application envelope. A generic shape example is valid JSON:
-
-```json
-{
-  "error": {
-    "code": "upstream_unavailable",
-    "message": "The upstream API is unavailable."
-  }
-}
-```
-
-Do not send browser credentials or tokens.
-
-Accept an inbound `X-Request-ID` only if it is a canonical UUID string within a fixed small length. Otherwise generate a UUID. Propagate the selected value to the API and echo it in the response. Treat it as observability data, never identity. Bound it and prevent log injection.
-
-Do not log raw request or response bodies, MongoDB URI values, passwords, or arbitrary field key names. Unknown keys and identity objects may contain personal data. Log the request ID, method, normalized route template, status, elapsed time, and safe exception category.
+Do not log raw request or response bodies, MongoDB URI values, passwords, credentials, arbitrary field key names, or raw invalid values. Unknown keys and identity objects may contain personal data. Log the request ID, method, normalized route template, status, elapsed time, and safe exception category.
 
 The React app provides:
 
@@ -920,9 +864,15 @@ The React app provides:
 - UTC timestamp display
 - read-only expandable JSON for `metadata` and each run's `details`
 
-Render null counts as `unknown`, never `0`. Render unrecognized verdict strings as plain text. Render `last_step_executed` as names, not links. Show `recorded_by` and `invoked_by` separately when present, and tolerate either being absent.
+The list view fetches `GET /v1/sessions` and uses only the eight root fields in section 8. It does not expect `metadata` or `runs`. The detail view fetches `GET /v1/sessions/{session_id}` and receives full `metadata` and `runs`. Encode the session ID as one URL path segment before constructing the detail URL. Preserve backend field names and JSON types. Do not compute a frontend `execution_outcome` from runs.
+
+Render null counts as `unknown`, never `0`. Treat absent counts as unknown. Render unrecognized verdict strings as plain text. Render `last_step_executed` as names, not links. In the detail view, show `recorded_by` and `invoked_by` separately when present, and tolerate either being absent.
 
 Render all data as text. Do not use `dangerouslySetInnerHTML` for errors or stored JSON.
+
+Browser `fetch` does not reject its promise for HTTP `4xx` or `5xx`. Check `response.ok` and verify the response `Content-Type` before treating a body as JSON. Application API errors use the envelope in section 9. NGINX can return HTML for `502` and `504`, and network failures have no HTTP body. Show a safe UI error in every case. Never render raw HTML returned by the edge or add a BFF to translate these errors. Preserve API error codes rather than remapping them.
+
+There is no SSR. Do not add browser credential or token handling for this unauthenticated POC.
 
 Serve `index.html` only for known UI GET paths:
 
@@ -931,7 +881,7 @@ Serve `index.html` only for known UI GET paths:
 /sessions/{session_id}
 ```
 
-An unknown BFF route returns `404`, not the SPA. A missing `/assets/*` resource returns `404`, not `index.html`. Any other unknown UI route returns `404`. The internal web health route is registered before fallback.
+Serve built assets under `/assets/*`. A missing asset returns `404`, not `index.html`. Any unknown UI route returns `404`. Old `/ui/api/*` paths also return `404`; they are neither compatibility proxies nor SPA routes. Register the internal web health route before static assets and UI routes.
 
 ## 12. NGINX and composed deployment
 
@@ -973,7 +923,7 @@ Response, `200 OK`:
 }
 ```
 
-These are process liveness checks. They do not query MongoDB and do not claim database readiness. A later database outage causes normal API requests to return sanitized `500` errors.
+These are process liveness checks. They do not query MongoDB and do not claim database readiness. The web health check does not test API readiness or connectivity. A later database outage causes normal API requests to return sanitized `500` errors.
 
 Use Python `urllib` for API and web container health checks so no extra command-line HTTP client is required:
 
@@ -988,7 +938,7 @@ Compose requirements:
 
 - `mongo` has a named volume and a health check.
 - `api` depends on healthy `mongo`.
-- `web` may start without API availability, but declare a health-aware API dependency for deterministic POC startup.
+- `web` has no API or MongoDB startup dependency because it serves static assets. Do not add either dependency.
 - `nginx` depends on healthy `api` and `web`.
 - All services use `restart: unless-stopped`.
 - `api`, `web`, and `mongo` may use `expose` but no host `ports`.
@@ -996,7 +946,7 @@ Compose requirements:
 
 NGINX forwards standard proxy headers for observability. Forwarded headers are not trusted identity and do not change the security model.
 
-The JSON error envelope is guaranteed for application API and BFF responses. NGINX-generated edge errors, including some `404`, `502`, and `504` responses, may be HTML. Do not claim a JSON envelope at the edge.
+The JSON error envelope is guaranteed for application API responses. NGINX-generated edge errors, including some `404`, `502`, and `504` responses, may be HTML and are seen directly by the browser. Do not claim a JSON envelope at the edge.
 
 Do not add a 443 listener, TLS material, an HTTP redirect, a body cap, or an unauthenticated MongoDB URI fallback.
 
@@ -1012,18 +962,13 @@ Commit `.env.example` with placeholders. Ignore `.env`. Never commit actual secr
 | `MONGO_APP_PASSWORD` | Mongo bootstrap | Required, none | Application user password |
 | `MONGO_INITDB_ROOT_USERNAME` | Mongo bootstrap and health check | Required, none | First-start root user name |
 | `MONGO_INITDB_ROOT_PASSWORD` | Mongo bootstrap and health check | Required, none | First-start root password |
-| `API_BASE_URL` | web BFF | `http://api:8000` | Upstream API base URL |
-| `HTTPX_CONNECT_TIMEOUT_SECONDS` | web BFF | `5` | BFF connect timeout |
-| `HTTPX_READ_TIMEOUT_SECONDS` | web BFF | `30` | BFF read timeout |
-| `HTTPX_WRITE_TIMEOUT_SECONDS` | web BFF | `30` | BFF write timeout |
-| `HTTPX_POOL_TIMEOUT_SECONDS` | web BFF | `5` | BFF pool acquisition timeout |
 | `LOG_LEVEL` | API and web | `INFO` | Application log level |
 | `TEST_MONGO_URI` | API integration tests only | Required for integration tests, none | Privileged test-deployment URI whose default database is exactly `quality_agent_test` and whose `authSource` is `admin` |
 | `TEST_MONGO_BASE_DB_NAME` | API integration tests only | `quality_agent_test` | Fixed base used to create one isolated fixture database named `quality_agent_test_<uuid4hex>` |
 
 Keep NGINX `proxy_read_timeout 60s` and MongoDB client timing in static configuration. Use a 5-second server selection timeout and sensible 30-second socket timing. Do not expose every internal setting as an environment variable.
 
-The frontend base URL is relative and needs no environment variable. Never put secrets in Vite variables because the bundle is visible to the browser.
+The webserver needs no upstream API URL or API credential. Frontend API URLs are relative and need no environment variable. Never put secrets in Vite variables because the bundle is visible to the browser.
 
 MongoDB authentication is distinct from HTTP authentication. Use the maintained MongoDB 8.0 release for the POC. MongoDB 5 or newer is required for the approved special-key behavior, but the pinned integration target is MongoDB 8.0.
 
@@ -1073,6 +1018,7 @@ Cover at least these cases:
 - Session lists are unbounded and send no hidden pagination query.
 - Detail reads use separate queries and make no snapshot claim.
 - Late run insertion into a terminal session succeeds.
+- Request ID acceptance, generation, and response-header echo follow the API contract in section 11.
 
 The MongoDB integration suite pins these behaviors against the chosen image and PyMongo lock:
 
@@ -1081,23 +1027,23 @@ The MongoDB integration suite pins these behaviors against the chosen image and 
 - empty patch returns `200` based on `matched_count`
 - server-side oversize codes used by the pinned MongoDB version map correctly
 
-### BFF tests
+### Static webserver tests
 
-Mock HTTPX at the transport boundary. Cover exact upstream paths, `4xx` passthrough, `5xx` mapping, connection failure, malformed JSON, timeout mapping, request ID validation and propagation, and one client per lifespan with shutdown close.
+Cover the known SPA routes, internal health, built asset MIME types, missing assets, unknown routes, and old `/ui/api/*` paths. Missing assets, unknown routes, and `/ui/api/*` must return `404`. Verify that the webserver creates no outbound HTTP client and makes no API or MongoDB call.
 
 ### UI tests
 
-Use Vitest and the React testing library. Cover loading, empty, and error states; unknown count rendering; UTC timestamps; unrecognized verdict text; missing identity values; expandable metadata and details; HTML-like stored text escaping; and the absence of direct browser calls to `/v1`.
+Use Vitest and the React testing library. Cover loading, empty, and error states; unknown count rendering; UTC timestamps; unrecognized verdict text; missing identity values; expandable metadata and details; and HTML-like stored text escaping. Assert the exact relative `/v1/sessions` and encoded `/v1/sessions/{session_id}` fetch paths, with no `/ui/api/*` calls. Cover non-OK API envelopes, non-JSON NGINX errors, and network failures without rendering raw HTML.
 
 ### Composed smoke tests
 
 Run HTTP smoke tests through NGINX. Verify `/v1` routing, known UI routes, unknown route behavior, missing assets, public host binding, and that API and web health routes are internal while edge `/healthz` is `404`.
 
-Do not set an arbitrary coverage percentage. No live MongoDB tests or application tests were run because the application code is not implemented. Do not claim tests passed until they have run in the implementation environment.
+Do not set an arbitrary coverage percentage. This specification does not establish the current test status. Do not claim tests passed until they have run in the implementation environment.
 
 ## 15. Build, run, and implementation sequence
 
-These are command contracts to create during implementation. They have not been executed yet.
+These are command contracts for the target implementation. Run them only when the current worktree implements the referenced files and workflows.
 
 Default composed workflow from the repository root:
 
@@ -1130,7 +1076,7 @@ cd api
 .venv/bin/python -m pytest -m integration
 ```
 
-Local BFF test workflow uses a separate environment to avoid the two `app` packages colliding:
+Local static webserver test workflow uses a separate environment to avoid the two `app` packages colliding:
 
 ```bash
 python3.12 -m venv web/server/.venv
@@ -1161,7 +1107,7 @@ Implement in small, reversible stages:
 1. Add API packaging, configuration, parsing, schemas, mapping, and unit tests.
 2. Add MongoDB repositories, indexes, lifespan, and real-Mongo integration tests.
 3. Add controllers and endpoint tests through FastAPI.
-4. Add the Python BFF, route tests, and request correlation.
+4. Align the Python webserver to serve static assets and internal health only. Add route tests and API request correlation.
 5. Add the React list and detail views with Vitest coverage.
 6. Add Mongo initialization, container builds, compose wiring, NGINX, and HTTP smoke tests.
 7. Run the complete pinned test set and record the versions actually verified.
