@@ -12,10 +12,9 @@ Use this order when sources conflict:
 
 1. `DESIGN.md`
 2. Current implementation and tests that conform to `DESIGN.md`
-3. `requirements.txt` as background only
-4. `run.json`, `Mongo Schema.txt`, `quality-agent-architecture.drawio`, and `noc-agent.drawio` as legacy or production context only
+3. `docs/architecture/quality-agent-architecture.drawio` as a living POC overview that follows `DESIGN.md`
 
-Do not edit the legacy sample, schema draft, requirements prose, or architecture diagrams to make an implementation change appear consistent.
+Keep the diagram aligned with the approved contract in `DESIGN.md`. Mark specified but unimplemented routes and flows as planned rather than removing them or presenting them as implemented. Diagram corrections do not change the API contract. Do not rewrite the design or diagram to conceal a nonconforming implementation.
 
 ## Hard rules
 

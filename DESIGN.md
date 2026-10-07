@@ -4,9 +4,11 @@
 
 This document is the executable specification for coding agents that build the quality agent proof of concept. Implement the behavior stated here. Do not infer missing behavior from nearby files.
 
-The existing `requirements.txt` is a prose problem statement, not a Python dependency file. The existing `run.json` is a legacy aggregate example. `Mongo Schema.txt` is a stale, non-JSON draft. `quality-agent-architecture.drawio` describes a production direction. `noc-agent.drawio` is also legacy context. Keep all five files unchanged.
+The living POC architecture diagram is `docs/architecture/quality-agent-architecture.drawio`. Keep its routes, flows, and deployment descriptions aligned with this document. Mark specified but unimplemented routes and flows as planned. Production-direction notes must be labelled as outside the POC, not as implemented behavior.
 
-This document supersedes those sources when they conflict. It defines the target POC contract. The presence of a file or scaffold in the worktree does not establish that it conforms to this contract.
+Earlier design notes referenced `requirements.txt`, `run.json`, `Mongo Schema.txt`, and `noc-agent.drawio`. Those files are not present in this repository and are not implementation sources.
+
+This document defines the target POC contract and takes precedence over the diagram and implementation. The presence of a file or scaffold in the worktree does not establish that it conforms to this contract.
 
 Build toward this complete repository shape. Files listed here are planned outputs, not current implementation claims:
 
@@ -18,6 +20,8 @@ DESIGN.md
 docker-compose.yml
 docker-compose.test.yml
 docs/
+  architecture/
+    quality-agent-architecture.drawio
   deployment.md
 api/
   Dockerfile
@@ -172,9 +176,9 @@ React renders JSON in the browser. There is no SSR. Node 22 is used only in a mu
 
 `web/Dockerfile` builds the frontend with a digest-pinned Node 22 image using `npm ci`, `npm test`, and `npm run build`. Copy only the resulting `dist/` into `/app/static` in the Python runtime stage. Keep the Compose build target named `runtime`. Host `frontend/dist`, `node_modules`, and environment files are excluded from the build context; a local frontend build is neither required nor used for image packaging. The build must fail if frontend verification fails or the resulting index/assets directory is missing.
 
-### Production diagram deviations
+### Differences from the original production proposal
 
-| Topic | Frozen production diagram or legacy source | POC contract |
+| Topic | Original production proposal | POC contract |
 | --- | --- | --- |
 | Transport and identity | HTTPS and authenticated agents | HTTP, no HTTP authentication |
 | Step identity | Run IDs | Step names in `last_step_executed` |
@@ -186,7 +190,7 @@ React renders JSON in the browser. There is no SSR. Node 22 is used only in a mu
 | Initial outcome | Incomplete draft values | `execution_outcome: null`, never fake zeros |
 | Run timestamp | `at` in the sample | `occurred_at` on storage and response; `at` accepted only as an input alias |
 
-The diagram now shows the same direct React-to-API data path as the POC. Its other production assumptions remain context only; the POC differences above govern implementation.
+These comparisons are historical context, not claims about the current diagram. The living POC diagram follows this contract, including direct React-to-API reads through NGINX and HTTP without authentication. It distinguishes the four implemented `/v1` routes from the planned run-creation route. The target remains five `/v1` endpoints; section 15 records the remaining implementation work.
 
 ## 4. API code structure and dependency direction
 
@@ -1416,7 +1420,7 @@ npm test
 npm run build
 ```
 
-Define `npm test` as the nonwatch command `vitest run`. Pin a Vite-compatible Node 22 builder image and commit `package-lock.json`. `requirements.txt` at the repository root remains prose and must never be passed to `pip`.
+Define `npm test` as the nonwatch command `vitest run`. Pin a Vite-compatible Node 22 builder image and commit `package-lock.json`. Use each Python server's packaging and lock files for dependencies, not the historical `requirements.txt` prose.
 
 After deployment, run the root smoke command:
 
