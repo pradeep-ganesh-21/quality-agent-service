@@ -1,6 +1,7 @@
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, Request, status
+from fastapi import APIRouter, Depends, Query, Request, status
+from pydantic import ValidationError
 
 from app.dependencies import get_session_service
 from app.errors import ApplicationError, ErrorCode
@@ -8,6 +9,7 @@ from app.repositories.protocols import SessionRecord
 from app.schemas.sessions import (
     SessionDetailResponse,
     SessionIdResponse,
+    SessionProjectionResponse,
     SessionSummaryResponse,
 )
 from app.services.mapping import parse_json_object
@@ -16,11 +18,23 @@ from app.services.session_service import SessionService
 router = APIRouter(prefix="/v1/sessions", tags=["sessions"])
 
 
-@router.get("", response_model=list[SessionSummaryResponse])
+@router.get(
+    "",
+    response_model=list[SessionSummaryResponse | SessionProjectionResponse],
+    response_model_exclude_unset=True,
+)
 async def list_sessions(
     service: Annotated[SessionService, Depends(get_session_service)],
-) -> list[SessionRecord]:
-    return await service.list_sessions()
+    fields: Annotated[list[str] | None, Query()] = None,
+) -> list[SessionSummaryResponse | SessionProjectionResponse]:
+    records = await service.list_sessions(fields)
+    # An incomplete default summary must not pass via the optional-fields model.
+    response_model = SessionSummaryResponse if fields is None else SessionProjectionResponse
+    try:
+        return [response_model.model_validate(record) for record in records]
+    except ValidationError:
+        # Do not let stored values or arbitrary keys reach the server error log.
+        raise ApplicationError(ErrorCode.INTERNAL_ERROR) from None
 
 
 @router.get("/{session_id}", response_model=SessionDetailResponse)

@@ -1,3 +1,4 @@
+from collections.abc import Sequence
 from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Any
@@ -13,6 +14,7 @@ from app.services.mapping import (
     SESSION_CREATE_RESERVED_FIELDS,
     SESSION_PATCH_CONSUMED_FIELDS,
     SESSION_PATCH_RESERVED_FIELDS,
+    normalize_session_fields,
     utc_milliseconds,
     validate_document_depth,
     validate_json_values,
@@ -24,8 +26,8 @@ class SessionService:
         self._repository = repository
         self._runs = runs
 
-    async def list_sessions(self) -> list[SessionRecord]:
-        return await self._repository.list_all()
+    async def list_sessions(self, fields: Sequence[str] | None = None) -> list[SessionRecord]:
+        return await self._repository.list_all(normalize_session_fields(fields))
 
     async def get_session(self, session_id: str) -> SessionRecord:
         session = await self._repository.get(session_id)

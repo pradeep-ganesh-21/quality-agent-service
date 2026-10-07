@@ -83,3 +83,31 @@ class SessionSummaryResponse(SessionIdResponse):
 class SessionDetailResponse(SessionSummaryResponse):
     metadata: dict[str, Any]
     runs: list[RunResponse]
+
+
+class SessionProjectionResponse(SessionIdResponse):
+    model_config = ConfigDict(extra="forbid", strict=True, hide_input_in_errors=True)
+
+    # Defaults represent omission and are excluded at the list response boundary.
+    schema_version: int | None = None
+    started_at: AwareDatetime | None = None
+    received_at: AwareDatetime | None = None
+    status: Literal["IN_PROGRESS", "COMPLETED", "FAILED"] | None = None
+    completion_time: AwareDatetime | None = None
+    last_step_executed: list[str] | None = None
+    execution_outcome: dict[str, Any] | None = None
+    metadata: dict[str, Any] | None = None
+
+    @field_validator(
+        "schema_version", "started_at", "received_at", "status", "last_step_executed", "metadata",
+        mode="before",
+    )
+    @classmethod
+    def reject_explicit_null(cls, value: Any) -> Any:
+        if value is None:
+            raise ValueError("This field must not be null when supplied.")
+        return value
+
+    @field_serializer("started_at", "received_at", "completion_time", when_used="json")
+    def serialize_timestamp(self, value: datetime | None) -> str | None:
+        return None if value is None else format_timestamp(value)

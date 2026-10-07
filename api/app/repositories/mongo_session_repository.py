@@ -14,7 +14,7 @@ from app.errors import ApplicationError, ErrorCode
 from app.repositories.mongo_read_errors import translate_read_errors
 from app.repositories.protocols import SessionRecord
 
-_SESSION_SUMMARY_PROJECTION = {
+_SESSION_DETAIL_PROJECTION = {
     "_id": 1,
     "schema_version": 1,
     "started_at": 1,
@@ -23,8 +23,8 @@ _SESSION_SUMMARY_PROJECTION = {
     "completion_time": 1,
     "last_step_executed": 1,
     "execution_outcome": 1,
+    "metadata": 1,
 }
-_SESSION_DETAIL_PROJECTION = {**_SESSION_SUMMARY_PROJECTION, "metadata": 1}
 
 
 def _session_record(document: dict[str, Any]) -> SessionRecord:
@@ -72,9 +72,11 @@ class MongoSessionRepository:
             )
         return None if document is None else _session_record(document)
 
-    async def list_all(self) -> list[SessionRecord]:
+    async def list_all(self, fields: tuple[str, ...]) -> list[SessionRecord]:
+        projection = {"_id": 1}
+        projection.update({field: 1 for field in fields if field != "session_id"})
         with translate_read_errors():
-            async with self._collection.find({}, _SESSION_SUMMARY_PROJECTION).sort(
+            async with self._collection.find({}, projection).sort(
                 [("started_at", -1), ("_id", -1)]
             ) as cursor:
                 documents = await cursor.to_list(length=None)

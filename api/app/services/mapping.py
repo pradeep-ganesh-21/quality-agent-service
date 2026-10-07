@@ -1,6 +1,7 @@
 import json
 import math
 import re
+from collections.abc import Sequence
 from datetime import datetime, timezone
 from typing import Any
 
@@ -37,12 +38,55 @@ EXECUTION_OUTCOME_COUNT_FIELDS = (
     "contract_ingredient_count",
 )
 
+SESSION_SUMMARY_FIELDS = (
+    "session_id",
+    "schema_version",
+    "started_at",
+    "received_at",
+    "status",
+    "completion_time",
+    "last_step_executed",
+    "execution_outcome",
+)
+_SELECTABLE_SESSION_ROOTS = frozenset((*SESSION_SUMMARY_FIELDS, "metadata"))
+_SELECTABLE_SESSION_CONTAINERS = frozenset({"metadata", "execution_outcome"})
+
 _RFC3339 = re.compile(
     r"[0-9]{4}-[0-9]{2}-[0-9]{2}[Tt]"
     r"(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]"
     r"(?:\.[0-9]+)?"
     r"(?:[Zz]|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])"
 )
+
+
+def normalize_session_fields(fields: Sequence[str] | None) -> tuple[str, ...]:
+    if fields is None:
+        return SESSION_SUMMARY_FIELDS
+    if not fields or isinstance(fields, str):
+        raise ApplicationError(ErrorCode.INVALID_FIELD)
+
+    paths = {("session_id",)}
+    for field in fields:
+        if not isinstance(field, str):
+            raise ApplicationError(ErrorCode.INVALID_FIELD)
+        _validate_utf8(field)
+        parts = tuple(field.split("."))
+        if (
+            parts[0] not in _SELECTABLE_SESSION_ROOTS
+            or (len(parts) > 1 and parts[0] not in _SELECTABLE_SESSION_CONTAINERS)
+            or any(not part or "\x00" in part or part.startswith("$") for part in parts)
+        ):
+            raise ApplicationError(ErrorCode.INVALID_FIELD)
+        paths.add(parts)
+
+    # Component sorting groups a parent with all descendants, including when
+    # similarly named siblings contain punctuation (metadata.a vs metadata.a-b).
+    selected: list[tuple[str, ...]] = []
+    for parts in sorted(paths):
+        if selected and parts[: len(selected[-1])] == selected[-1]:
+            continue
+        selected.append(parts)
+    return tuple(".".join(parts) for parts in selected)
 
 
 def _reject_non_finite_constant(value: str) -> None:

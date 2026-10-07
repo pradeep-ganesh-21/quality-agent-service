@@ -104,7 +104,7 @@ Do not add the following:
 - request body size caps in NGINX or either FastAPI application
 - CORS middleware as a security control
 - server-side rendering
-- pagination, result limits, silent truncation, filters, or search
+- pagination, result limits, silent truncation, result filtering, or search (list response field selection is allowed as specified in section 8)
 - retries, queues, sweepers, caches, Redis, or cross-collection transactions
 - idempotency keys, replay deduplication, optimistic counters, or alternate ID lookup
 - `PUT`, delete endpoints, generic CRUD bases, an ODM, Motor, or a separate business or domain layer
@@ -131,6 +131,8 @@ React fetches only these relative API paths:
 /v1/sessions
 /v1/sessions/{session_id}
 ```
+
+List requests may append repeated `fields` query parameters as defined in section 8. Field selection uses the query string, not a GET request body.
 
 NGINX sends `/v1/*` to the API on container port 8000. It sends UI and asset requests to the web container on port 8080. The web container serves static React assets and its internal liveness route only. It does not call the API or MongoDB.
 
@@ -185,7 +187,7 @@ class SessionRepository(Protocol):
     async def create(self, values: Mapping[str, Any]) -> str: ...
     async def exists(self, session_id: str) -> bool: ...
     async def get(self, session_id: str) -> SessionRecord | None: ...
-    async def list_all(self) -> list[SessionRecord]: ...
+    async def list_all(self, fields: tuple[str, ...]) -> list[SessionRecord]: ...
     async def patch_open_session(
         self,
         session_id: str,
@@ -203,6 +205,8 @@ class RunRepository(Protocol):
 ```
 
 The record dictionaries are application DTOs. Their IDs are strings and their timestamps are Python datetimes. They never contain ObjectIds, clients, cursors, filters, or MongoDB operators.
+
+For list reads, the service resolves the default fields or validates and normalizes supplied field paths before calling `list_all`. The tuple contains application field paths, not a database projection. It always includes `session_id`. Only the adapter maps this ID to `_id` and constructs the inclusion projection.
 
 Use this call mapping:
 
@@ -289,7 +293,7 @@ If a session input contains a flat field literally named `metadata`, treat it as
 
 `recorded_by` and `invoked_by` are distinct names. If supplied, both are unverified identity extras. Session extras go under `metadata`; run extras go under `details`. Do not synthesize `recorded_by`, authenticate either value, or promote either to the root.
 
-Unknown nested values may contain objects, arrays, dots in key names, dollar-prefixed key names, nulls, numbers, booleans, and strings. Preserve the parsed structure at every depth. Never flatten, rewrite, evaluate, index, sort, filter, or use unknown values for business logic. Return them for display and tolerate their absence.
+Unknown nested values may contain objects, arrays, dots in key names, dollar-prefixed key names, nulls, numbers, booleans, and strings. Preserve the parsed structure at every depth. Never flatten, rewrite, evaluate, index, sort, use unknown values to filter records, or use them for business logic. List field selection may retrieve subtrees for display without changing stored data. Return selected values in their nested structure and tolerate their absence.
 
 Reject any NUL character in a JSON object key at any depth. A NUL in a string value is allowed if BSON encoding accepts it. A nested `_id` is an unknown nested key and is allowed. Only listed top-level reserved fields are rejected.
 
@@ -600,7 +604,7 @@ An empty result is a `200 OK` response with this body:
 
 There is no pagination, limit, continuation token, or truncation. Sort by `started_at` descending, then `_id` descending.
 
-Each summary contains only this root allowlist. Exclude both `metadata` and `runs`:
+With no `fields` parameter, each summary contains only this root allowlist. Exclude both `metadata` and `runs`:
 
 ```text
 session_id
@@ -613,7 +617,43 @@ last_step_executed
 execution_outcome
 ```
 
-Use this allowlist as the MongoDB projection so list requests do not load metadata.
+Use this allowlist as the default MongoDB projection so unqualified list requests do not load metadata.
+
+#### Optional field selection
+
+Repeat the `fields` query parameter to select response paths. Do not use a GET body or a comma-separated field list:
+
+```text
+GET /v1/sessions?fields=started_at&fields=metadata.invoked_by.name&fields=metadata.boundary
+```
+
+Example response, `200 OK`:
+
+```json
+[
+  {
+    "session_id": "68df8b00aef4d8537282f001",
+    "started_at": "2026-10-01T09:07:04.000Z",
+    "metadata": {
+      "invoked_by": {"name": "Example operator"},
+      "boundary": "example-service"
+    }
+  }
+]
+```
+
+- Always return `session_id`, including for `?fields=session_id`, which returns ID-only records.
+- Select any root field in the default allowlist, `metadata`, or a nested path below `metadata` or `execution_outcome`. Never select `runs` on the list endpoint.
+- Selecting a parent returns its complete subtree without coercing values or dropping arbitrary keys. Dots in a selector denote nesting. To retrieve a key containing a literal dot or a dollar prefix, select its parent instead.
+- Reject unknown roots, descendants of non-container root fields, empty selectors or path components, NUL, invalid UTF-8, and dollar-prefixed path components with `400 invalid_field`. Validate all selectors before deduplication or collapsing parent/child overlaps; a valid parent must not conceal an invalid child.
+- Deduplicate paths and collapse descendants when their parent is selected. The response contains no unrequested root fields other than the mandatory ID. Do not add application defaults for omitted fields. Preserve empty objects already returned by the database projection, such as `metadata: {}` when a selected leaf is absent.
+- Use MongoDB's nested inclusion-projection semantics for arrays and missing or non-object intermediate values; do not implement a second projection engine in application code. A missing selected leaf is not synthesized. A selected value that is explicitly null stays null.
+- Return the same unbounded session set in the same `started_at` descending, `_id` descending order, even when those sort fields are not selected. This is field selection, not record filtering.
+- Validate and serialize only the fields present in a projected response. Present non-nullable root fields remain strict and non-nullable. Serialize selected root timestamps with exactly milliseconds and `Z`, as in the default response. Keep default-summary and full-detail validation strict and independent.
+
+Keep the full detail projection fixed and separate from request-specific list projections. Do not inherit nested selections into the detail projection: selecting both `metadata` and one of its descendants can cause a database path collision. Field selection changes only reads and responses, not the stored shape, indexes, or `schema_version`.
+
+Selecting full `metadata` can substantially increase memory use and response sizes across an unbounded list. The existing unauthenticated-access and unbounded-read risks still apply; do not introduce hidden limits to compensate.
 
 ### `GET /v1/sessions/{session_id}`
 
@@ -862,7 +902,7 @@ The React app provides:
 - UTC timestamp display
 - read-only expandable JSON for `metadata` and each run's `details`
 
-The list view fetches `GET /v1/sessions` and uses only the eight root fields in section 8. It does not expect `metadata` or `runs`. The detail view fetches `GET /v1/sessions/{session_id}` and receives full `metadata` and `runs`. Encode the session ID as one URL path segment before constructing the detail URL. Preserve backend field names and JSON types. Do not compute a frontend `execution_outcome` from runs.
+The list view fetches `GET /v1/sessions`. Without field selection it receives the eight root fields in section 8 and no `metadata` or `runs`. A list view may request repeated `fields` parameters for its columns and must then expect only those selected paths plus `session_id`; selected metadata is not necessarily complete. The detail view fetches `GET /v1/sessions/{session_id}` and receives full `metadata` and `runs`, independently of list selections. Encode the session ID as one URL path segment before constructing the detail URL. Preserve backend field names and JSON types. Do not compute a frontend `execution_outcome` from runs.
 
 Render null counts as `unknown`, never `0`. Treat absent counts as unknown. Render unrecognized verdict strings as plain text. Render `last_step_executed` as names, not links. In the detail view, show `recorded_by` and `invoked_by` separately when present, and tolerate either being absent.
 
@@ -1014,6 +1054,12 @@ Cover at least these cases:
 - Cumulative metadata growth by patch returns `413` and leaves the prior document unchanged.
 - Non-finite numbers, huge integers, NUL keys, parse recursion, and final depth over 100 return `400` with the intended code.
 - Session lists are unbounded and send no hidden pagination query.
+- Default session lists retain exactly the eight root fields and exclude metadata and runs.
+- Repeated list `fields` selectors select nested values while always returning `session_id`. ID-only and empty-result requests work without loading full documents or querying runs.
+- Invalid field selectors return sanitized `400 invalid_field` before any repository call. Validate invalid children even when a valid parent is also selected.
+- Duplicate and overlapping paths collapse without confusing siblings such as `metadata.a` and `metadata.ab`. Selection does not change ordering or add limits.
+- Selected nulls and missing values remain distinct. Selected root timestamps retain UTC millisecond formatting; complete selected parents preserve special keys and large integers.
+- A projected list read does not narrow later list or detail reads. Default and detail responses still reject incomplete or invalid repository records.
 - Detail reads use separate queries and make no snapshot claim.
 - Late run insertion into a terminal session succeeds.
 - Request ID acceptance, generation, and response-header echo follow the API contract in section 11.
