@@ -17,6 +17,8 @@ AGENTS.md
 DESIGN.md
 docker-compose.yml
 docker-compose.test.yml
+docs/
+  deployment.md
 api/
   Dockerfile
   pyproject.toml
@@ -62,11 +64,29 @@ web/
       errors.py
       routes.py
     tests/
+    image_tests/
+      test_bundle.py
   frontend/
     package.json
     package-lock.json
     index.html
+    tsconfig.json
+    vite.config.ts
     src/
+      main.tsx
+      App.tsx
+      SessionList.tsx
+      SessionDetail.tsx
+      sessionColumns.tsx
+      JsonBlock.tsx
+      ReadNotice.tsx
+      useApiRead.ts
+      api.ts
+      types.ts
+      json.ts
+      core-js-json.d.ts
+      format.ts
+      styles.css
     tests/
 nginx/
   nginx.conf
@@ -74,6 +94,8 @@ mongo/
   init-app-user.js
 scripts/
   smoke.py
+  tests/
+    test_smoke.py
 ```
 
 The POC has four service containers on one host and one shared Docker network:
@@ -141,6 +163,8 @@ The UI and API share the NGINX origin, so browser reads require no CORS configur
 Direct browser calls are the smaller POC design because the UI needs no server-held API credentials, response aggregation, or view-model transformation. Do not add a BFF, server rendering, or `/ui/api/*` data routes. Do not use the Docker hostname `api`, hardcode its internal port, or introduce `API_BASE_URL` in browser code.
 
 React renders JSON in the browser. There is no SSR. Node 22 is used only in a multistage image build for the Vite bundle. The final `web` image runs Python, FastAPI, and Uvicorn. It contains the built static assets but no Node runtime.
+
+`web/Dockerfile` builds the frontend with a digest-pinned Node 22 image using `npm ci`, `npm test`, and `npm run build`. Copy only the resulting `dist/` into `/app/static` in the Python runtime stage. Keep the Compose build target named `runtime`. Host `frontend/dist`, `node_modules`, and environment files are excluded from the build context; a local frontend build is neither required nor used for image packaging. The build must fail if frontend verification fails or the resulting index/assets directory is missing.
 
 ### Production diagram deviations
 
@@ -880,13 +904,20 @@ web/
       errors.py
       routes.py
     tests/
+    image_tests/
   frontend/
     package.json
+    package-lock.json
+    index.html
+    tsconfig.json
+    vite.config.ts
     src/
     tests/
 ```
 
 The webserver runs FastAPI and Uvicorn on container port 8080. It serves the built React files and exposes the existing internal `GET /healthz` liveness route. It has no API client, MongoDB client, upstream API URL, relay route, response mapping, retry, cache, authentication, or aggregation behavior.
+
+`create_app(static_root: Path | None = None)` accepts a path override for tests. By default it resolves `static/` alongside the Python `app` package, which is `/app/static` in the runtime image. That directory is a generated image artifact, not a tracked source folder. A missing build still returns `404` on UI requests while process liveness succeeds; image verification and composed smoke checks, not health checks, prove that the frontend is packaged.
 
 Add `web/server/app/config.py` only when local webserver settings, such as `LOG_LEVEL`, need it. Do not retain an empty settings module or add new runtime configuration knobs. HTTPX belongs only in test dependencies for the in-process test client. The web runtime has no upstream HTTPX client, `API_BASE_URL`, upstream timeout settings, or relay routes.
 
@@ -904,6 +935,10 @@ The React app provides:
 
 The list view fetches `GET /v1/sessions`. Without field selection it receives the eight root fields in section 8 and no `metadata` or `runs`. A list view may request repeated `fields` parameters for its columns and must then expect only those selected paths plus `session_id`; selected metadata is not necessarily complete. The detail view fetches `GET /v1/sessions/{session_id}` and receives full `metadata` and `runs`, independently of list selections. Encode the session ID as one URL path segment before constructing the detail URL. Preserve backend field names and JSON types. Do not compute a frontend `execution_outcome` from runs.
 
+The implemented table configuration is `web/frontend/src/sessionColumns.tsx`. Its initial three columns request `started_at`, `metadata.invoked_by.name`, and `metadata.boundary`. Each definition supplies its header, required fields, and renderer. Changing columns requires a frontend rebuild, not a new API endpoint or a runtime column picker. A row opens a full, independent session-detail read. Keep partial-list validation separate from strict default-summary and full-detail validation.
+
+Frontend `json.ts` parses integer source tokens outside the safe JavaScript number range into `bigint` and serializes them back as unquoted JSON numbers for display. Preserve ordinary floating-point semantics and leave numeric strings as strings. Use the exact-number formatter for metadata, outcomes, run details, and the full-response disclosure; do not pass these records to native `JSON.stringify` or coerce large integers to `number`.
+
 Render null counts as `unknown`, never `0`. Treat absent counts as unknown. Render unrecognized verdict strings as plain text. Render `last_step_executed` as names, not links. In the detail view, show `recorded_by` and `invoked_by` separately when present, and tolerate either being absent.
 
 Render all data as text. Do not use `dangerouslySetInnerHTML` for errors or stored JSON.
@@ -920,6 +955,8 @@ Serve `index.html` only for known UI GET paths:
 ```
 
 Serve built assets under `/assets/*`. A missing asset returns `404`, not `index.html`. Any unknown UI route returns `404`. Old `/ui/api/*` paths also return `404`; they are neither compatibility proxies nor SPA routes. Register the internal web health route before static assets and UI routes.
+
+Serve `index.html` with `Cache-Control: no-cache` so browsers revalidate the entry page after deployment rather than retaining references to replaced asset hashes. This does not add an application cache. Keep unknown paths and trailing-slash variants as `404`, and keep asset containment enforced by the static server.
 
 ## 12. NGINX and composed deployment
 
@@ -1075,6 +1112,8 @@ The MongoDB integration suite pins these behaviors against the chosen image and 
 
 Cover the known SPA routes, internal health, built asset MIME types, missing assets, unknown routes, and old `/ui/api/*` paths. Missing assets, unknown routes, and `/ui/api/*` must return `404`. Verify that the webserver creates no outbound HTTP client and makes no API or MongoDB call.
 
+`web/server/tests` uses temporary HTML/CSS/JavaScript fixtures and runs without a frontend build. `web/server/image_tests` is a separate, explicitly selected suite for the Docker test target: use the default static root and the actual bundle inherited from the runtime image, without host asset mounts or skip-on-missing behavior. Parse the packaged HTML and request its generated scripts and stylesheets; also verify deep links, internal liveness, missing routes, non-root execution, and absence of Node/npm. Verify the HTML cache-revalidation header in fixture and image tests.
+
 ### UI tests
 
 Use Vitest and the React testing library. Cover loading, empty, and error states; unknown count rendering; UTC timestamps; unrecognized verdict text; missing identity values; expandable metadata and details; and HTML-like stored text escaping. Assert the exact relative `/v1/sessions` and encoded `/v1/sessions/{session_id}` fetch paths, with no `/ui/api/*` calls. Cover non-OK API envelopes, non-JSON NGINX errors, and network failures without rendering raw HTML.
@@ -1082,6 +1121,10 @@ Use Vitest and the React testing library. Cover loading, empty, and error states
 ### Composed smoke tests
 
 Run HTTP smoke tests through NGINX. Verify `/v1` routing, known UI routes, unknown route behavior, missing assets, public host binding, and that API and web health routes are internal while edge `/healthz` is `404`.
+
+`scripts/smoke.py` performs GET-only deployment checks. Require root/deep-link HTML, discover and fetch same-origin `/assets/` scripts/styles with correct MIME types, check selected and ID-only session lists, and reject an invalid selector even on an empty database. When a session exists, check one complete detail response. Do not compare separate reads as snapshots or print record contents. Reject redirects and unexpected response types. Edge `404` responses need not be JSON. Cover smoke failures with `python3 -m unittest discover -s scripts/tests -v`.
+
+HTTP smoke checks do not execute React. Separately verify in a browser that the table or empty state renders, and that row navigation and full details work when data exists. Do not claim browser verification from HTTP status checks alone.
 
 Do not set an arbitrary coverage percentage. This specification does not establish the current test status. Do not claim tests passed until they have run in the implementation environment.
 
@@ -1095,6 +1138,19 @@ Default composed workflow from the repository root:
 docker compose build
 docker compose up -d --wait
 ```
+
+See [deployment instructions](docs/deployment.md) for image tests, safe redeployment of the existing local stack, smoke verification, and rollback. Health alone is not the deployment acceptance gate. Verify only NGINX publishes `0.0.0.0:8080`, preserve the MongoDB volume, and refresh NGINX after replacing upstream containers so its resolved addresses are current.
+
+Verify the packaged web image without a host `dist/` mount:
+
+```bash
+docker build --target test -t quality-agent-web-packaging-tests web
+docker run --rm --network none quality-agent-web-packaging-tests
+docker build --target test -t quality-agent-api-tests api
+docker run --rm --network none quality-agent-api-tests
+```
+
+The test target inherits the runtime bundle and runs `tests` plus `image_tests`. The Node builder also runs frontend tests and the type-checked production build. Runtime images do not include Python test dependencies or Node/npm.
 
 The default runtime images must not include developer reload. They may omit test dependencies. `docker-compose.test.yml` defines the explicit development image target, a test MongoDB deployment or connection, and test-only credentials. Once implemented, run integration tests on its internal network without publishing MongoDB to the host:
 
@@ -1140,11 +1196,13 @@ npm run build
 
 Define `npm test` as the nonwatch command `vitest run`. Pin a Vite-compatible Node 22 builder image and commit `package-lock.json`. `requirements.txt` at the repository root remains prose and must never be passed to `pip`.
 
-After the composed application and `scripts/smoke.py` exist, run the root smoke command:
+After deployment, run the root smoke command:
 
 ```bash
-python scripts/smoke.py --base-url http://localhost:8080
+python3 scripts/smoke.py --base-url http://localhost:8080
 ```
+
+The fixture web tests, image tests, frontend unit/interaction tests, API unit tests, and HTTP smoke workflow have executable files in the worktree. The guarded real-Mongo integration suite, Compose test overlay, run-creation endpoint, and API request-correlation middleware remain separate planned work. Do not describe those capabilities as verified by frontend deployment checks.
 
 Implement in small, reversible stages:
 

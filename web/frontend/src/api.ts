@@ -9,11 +9,22 @@ import type {
   JsonValue,
   Run,
   SessionDetail,
+  SessionListRecord,
   SessionSummary,
 } from './types';
 
 export function listSessions(signal?: AbortSignal): Promise<ApiResult<SessionSummary[]>> {
   return getJson('/v1/sessions', isSessionList, signal);
+}
+
+export function listSessionFields(
+  fields: readonly string[],
+  signal?: AbortSignal,
+): Promise<ApiResult<SessionListRecord[]>> {
+  const query = new URLSearchParams();
+  const selected = fields.length === 0 ? ['session_id'] : [...new Set(fields)];
+  for (const field of selected) query.append('fields', field);
+  return getJson(`/v1/sessions?${query.toString()}`, isProjectedSessionList, signal);
 }
 
 export function getSession(
@@ -136,17 +147,36 @@ function isOutcome(value: JsonValue | undefined): value is ExecutionOutcome | nu
   });
 }
 
+const sessionFieldChecks: Record<keyof SessionSummary, (value: JsonValue | undefined) => boolean> = {
+  session_id: isId,
+  schema_version: (value) => value === 1,
+  started_at: isTimestamp,
+  received_at: isTimestamp,
+  status: (value) => SESSION_STATUSES.some((status) => status === value),
+  completion_time: (value) => value === null || isTimestamp(value),
+  last_step_executed: (value) => Array.isArray(value)
+    && value.every((step) => typeof step === 'string'),
+  execution_outcome: isOutcome,
+};
+
 function isSessionSummary(value: JsonValue): value is SessionSummary {
+  return isObject(value) && Object.entries(sessionFieldChecks).every(
+    ([field, accepts]) => Object.hasOwn(value, field) && accepts(value[field]),
+  );
+}
+
+function isProjectedSession(value: JsonValue): value is SessionListRecord {
   return isObject(value)
-    && isId(value.session_id)
-    && value.schema_version === 1
-    && isTimestamp(value.started_at)
-    && isTimestamp(value.received_at)
-    && SESSION_STATUSES.some((status) => status === value.status)
-    && (value.completion_time === null || isTimestamp(value.completion_time))
-    && Array.isArray(value.last_step_executed)
-    && value.last_step_executed.every((step) => typeof step === 'string')
-    && isOutcome(value.execution_outcome);
+    && Object.hasOwn(value, 'session_id') && isId(value.session_id)
+    && Object.keys(value).every((field) => field === 'metadata' || Object.hasOwn(sessionFieldChecks, field))
+    && (!Object.hasOwn(value, 'metadata') || isObject(value.metadata))
+    && Object.entries(sessionFieldChecks).every(
+      ([field, accepts]) => !Object.hasOwn(value, field) || accepts(value[field]),
+    );
+}
+
+function isProjectedSessionList(value: JsonValue): value is SessionListRecord[] {
+  return Array.isArray(value) && value.every(isProjectedSession);
 }
 
 function isSessionList(value: JsonValue): value is SessionSummary[] {

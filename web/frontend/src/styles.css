@@ -1,0 +1,74 @@
+:root {
+  font-family: "Segoe UI", system-ui, sans-serif;
+  color: #17243a;
+  background: #f3f6fa;
+  font-synthesis: none;
+  line-height: 1.5;
+  --surface: #ffffff;
+  --ink: #17243a;
+  --muted: #53657c;
+  --rule: #cdd7e3;
+  --accent: #2356a8;
+  --mono: "SFMono-Regular", Consolas, monospace;
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; }
+a { color: var(--accent); text-underline-offset: 0.2em; }
+a:hover { text-decoration-thickness: 2px; }
+:focus-visible { outline: 3px solid var(--accent); outline-offset: 4px; }
+h1, h2, h3 { font-family: "Aptos Display", "Trebuchet MS", sans-serif; line-height: 1.2; }
+h1 { font-size: clamp(1.8rem, 3vw, 2.5rem); letter-spacing: -0.035em; margin: 0.4rem 0 0.6rem; }
+h2 { font-size: 1.2rem; margin: 0 0 1.25rem; }
+h3 { font-size: 1rem; margin: 0; overflow-wrap: anywhere; }
+p { margin: 0 0 0.75rem; }
+code, pre, time { font-family: var(--mono); }
+code, time { font-size: 0.875em; font-variant-numeric: tabular-nums; }
+.muted { color: var(--muted); }
+.app-header { min-height: 4rem; padding: 1rem clamp(1rem, 4vw, 3rem); background: var(--surface); border-bottom: 1px solid var(--rule); display: flex; align-items: center; gap: 1.5rem; }
+.brand { font-weight: 700; color: var(--ink); text-decoration: none; }
+.app-header > span { color: var(--muted); font-size: 0.8rem; border-left: 1px solid var(--rule); padding-left: 1.5rem; }
+.app-main { max-width: 88rem; margin: 0 auto; padding: 2.5rem clamp(1rem, 4vw, 3rem) 4rem; }
+.page-heading { margin-bottom: 2rem; }
+.eyebrow { color: var(--muted); font-size: 0.75rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.12em; }
+.back-link { display: inline-block; margin-bottom: 0.8rem; font-size: 0.875rem; }
+.table-scroll { overflow-x: auto; border: 1px solid var(--rule); border-radius: 0.5rem; background: var(--surface); }
+.session-table { width: 100%; border-collapse: collapse; text-align: left; }
+.session-table th { padding: 0.8rem 1.25rem; background: #e9eff7; color: var(--muted); font-weight: 600; font-size: 0.8rem; white-space: nowrap; }
+.session-table td { padding: 1.1rem 1.25rem; border-top: 1px solid var(--rule); vertical-align: top; overflow-wrap: anywhere; }
+.session-table td:first-child { min-width: 19rem; border-right: 1px solid var(--rule); }
+.session-table tbody tr { cursor: pointer; }
+.session-table tbody tr:hover, .session-table tbody tr:focus-within { background: #f0f5ff; }
+.session-table td a { display: inline-block; }
+.json-cell { white-space: pre-wrap; overflow-wrap: anywhere; }
+.record { display: grid; gap: 1.5rem; }
+.record-section { padding: clamp(1rem, 3vw, 2rem); background: var(--surface); border: 1px solid var(--rule); border-radius: 0.5rem; min-width: 0; }
+.section-heading { display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: 1rem; margin-bottom: 1.25rem; }
+.section-heading h2 { margin: 0; }
+.status-label, .verdict { font-family: var(--mono); font-size: 0.8rem; padding: 0.25rem 0.5rem; border: 1px solid var(--rule); background: #f3f6fa; overflow-wrap: anywhere; }
+.record-fields, .identity-fields, .outcome-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 16rem), 1fr)); gap: 1.25rem 2rem; margin: 0 0 1.5rem; }
+dt { color: var(--muted); font-size: 0.8rem; margin-bottom: 0.3rem; }
+dd { margin: 0; overflow-wrap: anywhere; }
+.wide-field { grid-column: 1 / -1; }
+.step-names { padding-left: 1.25rem; margin: 0; }
+.outcome-fields dd { font-family: var(--mono); font-size: 1.15rem; font-variant-numeric: tabular-nums; }
+.run-list { display: grid; gap: 1rem; }
+.run-record { border-left: 3px solid var(--rule); padding: 0.5rem 0 0.5rem 1.25rem; min-width: 0; }
+.run-record .section-heading { margin-bottom: 1rem; }
+.json-block { background: var(--surface); border: 1px solid var(--rule); border-radius: 0.3rem; min-width: 0; }
+.json-block summary { cursor: pointer; padding: 0.8rem 1rem; color: var(--accent); font-size: 0.875rem; overflow-wrap: anywhere; }
+.json-block[open] summary { border-bottom: 1px solid var(--rule); }
+.json-block pre { margin: 0; padding: 1rem; max-width: 100%; overflow: auto; font-size: 0.8rem; line-height: 1.65; tab-size: 2; }
+.notice { background: var(--surface); border: 1px solid var(--rule); border-radius: 0.4rem; padding: 1.5rem; }
+.notice-error { border-left: 4px solid #a72e35; }
+.notice-detail { color: var(--muted); font-size: 0.8rem; margin: 0.3rem 0 0; }
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+.skip-link { position: absolute; top: -10rem; left: 1rem; background: var(--surface); padding: 0.5rem 1rem; z-index: 1; }
+.skip-link:focus { top: 0.5rem; }
+
+@media (max-width: 40rem) {
+  .app-header > span { display: none; }
+  .app-main { padding-top: 1.5rem; }
+  .session-table th, .session-table td { padding: 0.85rem; }
+  .run-record { padding-left: 0.75rem; }
+}

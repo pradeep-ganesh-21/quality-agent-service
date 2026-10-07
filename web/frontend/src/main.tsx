@@ -1,5 +1,9 @@
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
+import { BrowserRouter } from 'react-router-dom';
+
+import { App } from './App';
+import './styles.css';
 
 const root = document.getElementById('root');
 if (root === null) {
@@ -8,9 +12,6 @@ if (root === null) {
 
 createRoot(root).render(
   <StrictMode>
-    <main>
-      <h1>Quality agent</h1>
-      <p>The frontend foundation is ready. Session views are not implemented yet.</p>
-    </main>
+    <BrowserRouter><App /></BrowserRouter>
   </StrictMode>,
 );

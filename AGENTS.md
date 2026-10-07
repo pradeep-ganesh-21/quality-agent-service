@@ -45,6 +45,7 @@ Do not edit the legacy sample, schema draft, requirements prose, or architecture
 - Do not add HTTP authentication, tokens, TLS, CORS as a security claim, queues, Redis, deletes, `PUT`, idempotency, or transactions.
 - Do not log bodies, credentials, arbitrary extra keys, or raw invalid values.
 - Treat API and web health routes as internal liveness only. Edge `/healthz` remains `404`.
+- Package the React build into the Python web image at `/app/static`. Verify the image without a host asset mount and run the composed UI/asset smoke checks before declaring deployment complete; healthy containers alone are not sufficient.
 - Keep the exact NGINX `location = /healthz { return 404; }` block before proxy locations.
 - Keep `.env` ignored and commit placeholders only in `.env.example`.
 - Run MongoDB integration tests only with the guarded, privileged test deployment settings in DESIGN.md. Never widen runtime application-user privileges.
@@ -55,3 +56,5 @@ Do not edit the legacy sample, schema draft, requirements prose, or architecture
 Check the implementation against the endpoint, error, index, web/browser, deployment, and test contracts in DESIGN.md. Run only commands that the repository now implements. State which commands ran and which did not.
 
 Do not claim a live MongoDB integration test, composed smoke test, package lock, or production behavior without evidence from the current worktree and test output.
+
+HTTP smoke checks do not execute React. Report browser verification separately and only when it was actually performed.

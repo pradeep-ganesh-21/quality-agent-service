@@ -24,6 +24,13 @@ export type SessionSummary = {
   execution_outcome: ExecutionOutcome | null;
 };
 
+export type SessionListRecord = Pick<SessionSummary, 'session_id'>
+  & Partial<Omit<SessionSummary, 'session_id'>>
+  & { metadata?: JsonObject };
+
+export type SessionFieldPath = keyof SessionSummary | 'metadata'
+  | `metadata.${string}` | `execution_outcome.${string}`;
+
 export type Run = {
   run_id: string;
   session_id: string;
