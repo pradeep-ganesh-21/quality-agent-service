@@ -42,6 +42,9 @@ Do not edit the legacy sample, schema draft, requirements prose, or architecture
 - Always project the list sort key to mint cursors, and strip it from records that did not select it.
 - Allow run insertion after a parent becomes terminal. Only session patch is status-guarded.
 - Browser code calls only relative `/v1/sessions` (optionally with repeated `fields` parameters and the DESIGN.md filter and paging parameters) and `/v1/sessions/{session_id}` paths through NGINX. It never uses the Docker hostname `api`, its internal port, `API_BASE_URL`, or `/ui/api/*`.
+- Read list rows from `page.items` and navigate only with response cursors. Keep applied filters, page size, and cursor in the browser URL. Keep unsubmitted filter drafts out of it, and drop the cursor when filters or page size change.
+- Offer browser page sizes `25`, `50`, and `100`, with `25` as the default. Do not narrow the API contract, which accepts `page_size` from 1 through 100.
+- Display session and run timestamps in the browser's named local time zone. Convert local filter inputs to one UTC API instant, and preserve API timestamp text in raw JSON and `dateTime` attributes.
 - The Python webserver serves built React assets and internal liveness only. It has no API or MongoDB client, BFF data routes, server rendering, retries, caching, authentication, or aggregation.
 - Keep default list items to the eight root fields in DESIGN.md, excluding metadata and runs. Explicit `fields` selection may include metadata paths; always return `session_id`, never runs, and do not fill omitted values. Validate selectors in services and build inclusion projections only in the repository adapter. Keep the full detail projection independent of selected list fields.
 - Serve the SPA only for `/` and `/sessions/{session_id}`. Unknown routes and missing assets return `404`.

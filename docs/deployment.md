@@ -60,6 +60,39 @@ python3 scripts/smoke.py --base-url http://localhost:8080
 
 Then perform the browser checks below. A green health status alone is not sufficient.
 
+## Using the sessions view
+
+See [DESIGN.md section 11](../DESIGN.md#11-static-web-server-and-react-application) for the normative frontend behavior.
+
+1. Open **http://localhost:8080/** after the stack is running.
+2. Open **Filters** and edit any of the five controls below.
+3. Select **Apply filters**, or press Enter in the form, to update the list. Edits do not affect requests until they are applied.
+4. Select **Clear filters** to remove the applied filters and return to the newest page. Clear keeps the current rows-per-page setting.
+
+| Control | Request parameter | Matching rule |
+| --- | --- | --- |
+| Status | `status` | `All statuses` omits the parameter. The other choices send `IN_PROGRESS`, `COMPLETED`, or `FAILED`. |
+| Boundary | `boundary` | Literal substring, ignoring case. |
+| Invoked by email | `invoked_by_email` | Exact full value, matched case-sensitively. |
+| Started from | `started_from` | Includes sessions at or after the entered local time. |
+| Started before | `started_before` | Excludes sessions at or after the entered local time. |
+
+Blank and whitespace-only text inputs are omitted. An explicitly empty parameter in a browser URL is rejected. Other text is sent verbatim, including surrounding spaces. The date controls use the browser's local time zone and send UTC instants to the API. Session and run timestamps are also displayed in local time, with the zone named on the page. Raw JSON and HTML `dateTime` values keep the API timestamp text.
+
+Choose `25`, `50`, or `100` rows per page. The default is `25`. **Next** and **Previous** use opaque API cursors. Changing the page size drops the cursor and returns to the newest page for the applied filters.
+
+Applied filters, nondefault page size, and cursor are stored in the browser URL. For example:
+
+```text
+http://localhost:8080/?status=COMPLETED&boundary=payments&page_size=50
+```
+
+Draft edits are not stored in the URL. Email addresses and other applied filter values are visible in the address bar, browser history, and shared links. They may also appear in access logs. Do not put a sensitive value in a filter URL.
+
+Counts are live and are not a snapshot with the current page. Sessions can move between pages while data changes. If a cursor points to an empty page but matches still exist, select **Return to newest sessions**.
+
+Opening a row in the same tab lets **All sessions** return to the current list URL. When list navigation state is absent, as with a direct detail URL or a new tab, **All sessions** falls back to `/`.
+
 ## Redeploy an existing running stack
 
 Confirm MongoDB is already running and healthy with `docker compose ps`. Before replacing API/web images, retain rollback tags for the images used by their current containers. For each service, obtain the image ID without displaying its environment:
@@ -84,27 +117,36 @@ Stop if any command fails. The `--no-deps` commands above assume the existing Mo
 
 ## Verification
 
+**Known smoke-check limitation**
+
+The selected-list request in `scripts/smoke.py` includes `status`, but `check_list` currently permits only `session_id`, `started_at`, and `metadata` for that response. The matching fixture in `scripts/tests/test_smoke.py` also expects `status` to be rejected. A valid populated response that includes the requested status therefore fails this check. An empty result does not exercise the row-field mismatch.
+
+This is a static code mismatch, not an observed deployment failure. Align the smoke validator and its fixture before using this selected-field check as an acceptance gate on populated data. Do not bypass the check or delete data to make it pass.
+
 The smoke script makes GET requests only. It checks:
 
 - Root and session-deep-link HTML.
 - The script and stylesheet URLs discovered in that HTML, including MIME types and nonempty bodies.
-- Representative selected-field and ID-only API responses, with the UTC timestamp format required by the browser.
-- Rejection of an unsupported field selector, even when no sessions exist.
+- Representative selected-field, ID-only, and filtered list responses using the five-field page envelope.
+- Rejection of an unsupported field selector and an invalid paging parameter, even when no sessions exist.
+- API timestamps in the UTC format required before browser-local display.
 - Full detail for one existing session, if available.
 - Missing assets, unknown routes, and legacy `/ui/api/*` paths returning `404`.
 - Edge `/healthz` returning `404`, including when NGINX sends an HTML error body.
 
 It does not insert test records, compare reads as snapshots, or print session contents. An empty database is a valid result. These deployment checks are not the privileged MongoDB integration suite described in DESIGN.md.
 
-In a browser:
+Manual browser checks:
+
+The sessions-view section above defines how the controls behave. Use these steps to verify the deployed bundle.
 
 1. Open http://localhost:8080/ and check that the session table or its empty state appears without an error banner.
 2. When sessions exist, click a row, inspect the detail page, expand its JSON, and navigate back.
 3. Refresh a session detail URL to check direct navigation.
 4. Check that the browser calls relative `/v1/sessions` paths through the same origin and that JavaScript/CSS load successfully.
-5. Open the filter panel, apply a status and a boundary filter, and confirm the request carries those parameters and the match count changes.
+5. Open the filter panel, apply a status and a boundary filter, and confirm the request carries those parameters and the page shows the live filtered match count.
 6. Set a date and time bound and confirm it is sent as a UTC instant that matches the local time entered. Check that displayed times use the zone named on the page.
-7. Page forward and back, change the rows per page, then refresh and use browser Back to confirm the URL restores the same filters and page.
+7. Page forward and back, change the rows per page, then refresh and use browser Back to confirm the URL restores the applied parameters and cursor. Do not expect the same records if data changed between reads.
 
 Use `docker compose ps` to confirm only NGINX publishes `0.0.0.0:8080`. API/web health checks are internal process-liveness checks. They do not prove frontend packaging or database readiness. Entry HTML uses `Cache-Control: no-cache` to revalidate references to generated asset hashes after deployment.
 
@@ -112,7 +154,7 @@ Use `docker compose ps` to confirm only NGINX publishes `0.0.0.0:8080`. API/web 
 
 Edit `web/frontend/src/sessionColumns.tsx`. Each definition supplies the header, field dependencies, and renderer. Update the matching UI assertions and rebuild/redeploy the web image. The current columns request `started_at`, `status`, `metadata.invoked_by.email`, and `metadata.boundary`.
 
-The smoke script uses that initial selection as a representative API check; it does not derive its selector from the frontend configuration. Update the smoke selector and its tests if the deployment check should exercise a different set of columns.
+The smoke script uses that current selection as a representative API check; it does not derive its selector from the frontend configuration. Update the smoke selector and its tests if the deployment check should exercise a different set of columns.
 
 No API change is required for supported field paths. The list API always supplies `session_id`; row navigation fetches complete session detail separately. Column selection is code configuration, not a browser picker.
 
@@ -123,9 +165,14 @@ No API change is required for supported field paths. The list API always supplie
 | Homepage returns JSON `404` while containers are healthy | Confirm the deployed web image was built with the frontend stage. The image tests must pass without a host `dist/` mount. |
 | HTML loads but a script or stylesheet returns `404` | Rebuild the complete web image and recreate its container. Run smoke checks against the asset URLs in the newly served HTML. |
 | NGINX returns `502` after replacing API/web | Wait for healthy upstreams, then recreate NGINX to refresh its resolved addresses. |
-| Field-selection smoke check fails | Rebuild and recreate the API image; an older API can ignore `fields` and return its default response. |
+| Field-selection smoke check fails | Check the known selected-field validator mismatch above first. If the response contains the requested `status`, align the smoke validator and fixture. Otherwise, rebuild and recreate the API image; an older API can ignore `fields` and return its default response. |
 | Table displays an API/network error | Use the smoke results to separate API/proxy failures from asset serving. Keep response bodies, identities, and credentials out of diagnostic logs. |
-| UI displays no sessions | An empty database is valid. Deployment verification does not create sample data. |
+| UI displays no sessions | Check whether the page says no sessions were recorded or no sessions match. Clear filters, and remember that nonblank text, including surrounding spaces, is matched literally. Deployment verification does not create sample data. |
+| UI shows an empty page with a positive match count | The cursor may outlive the records on that page. Select **Return to newest sessions**. |
+| UI rejects a list URL before loading | Remove unknown or repeated parameters. Use only page sizes `25`, `50`, or `100`, and correct invalid status or time-range values. |
+| UI reports an invalid list response after an API upgrade | Rebuild and recreate the web image. An older frontend may still expect the retired bare-array response instead of the five-field page envelope. |
+
+The UI does not retry failed reads automatically. Correct the URL or service problem, then reload or navigate again.
 
 ## Rollback
 

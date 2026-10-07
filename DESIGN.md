@@ -80,7 +80,9 @@ web/
       App.tsx
       SessionList.tsx
       SessionDetail.tsx
+      SessionFilters.tsx
       sessionColumns.tsx
+      sessionQuery.ts
       JsonBlock.tsx
       ReadNotice.tsx
       useApiRead.ts
@@ -712,7 +714,7 @@ Use this allowlist as the default MongoDB projection so unqualified list request
 Repeat the `fields` query parameter to select response paths. Do not use a GET body or a comma-separated field list:
 
 ```text
-GET /v1/sessions?fields=started_at&fields=metadata.invoked_by.name&fields=metadata.boundary
+GET /v1/sessions?fields=started_at&fields=status&fields=metadata.invoked_by.email&fields=metadata.boundary
 ```
 
 Example response, `200 OK`:
@@ -723,8 +725,9 @@ Example response, `200 OK`:
     {
       "session_id": "68df8b00aef4d8537282f001",
       "started_at": "2026-10-01T09:07:04.000Z",
+      "status": "COMPLETED",
       "metadata": {
-        "invoked_by": {"name": "Example operator"},
+        "invoked_by": {"email": "operator@example.invalid"},
         "boundary": "example-service"
       }
     }
@@ -1059,13 +1062,72 @@ The React app provides:
 - browser-local timestamp display, with the resolved time zone named in each view
 - read-only expandable JSON for `metadata` and each run's `details`
 
-The list view fetches `GET /v1/sessions`. Every list response is the page envelope in section 8, so the view reads its rows from `items`. Without field selection those rows carry the eight root fields and no `metadata` or `runs`. A list view may request repeated `fields` parameters for its columns and must then expect only those selected paths plus `session_id`; selected metadata is not necessarily complete. The detail view fetches `GET /v1/sessions/{session_id}` and receives full `metadata` and `runs`, independently of list selections. Encode the session ID as one URL path segment before constructing the detail URL. Preserve backend field names and JSON types. Do not compute a frontend `execution_outcome` from runs.
+### Session table and requests
 
-Formatted timestamps are rendered in the browser time zone, and each view names that zone once rather than suffixing every value. Conversion is display-only: stored values, request parameters, `dateTime` attributes, and the raw JSON disclosures keep the API's UTC text. Timestamp text is never parsed back into a request from a formatted display value.
+The list view fetches `GET /v1/sessions` and reads rows from the response `items` array. It requires the five-field page envelope from section 8 and rejects a bare array.
 
-The list view owns filter and pagination controls. It sends the section 8 filter, `page_size`, and `cursor` parameters verbatim, reads navigation state only from `next_cursor` and `previous_cursor`, and displays `total_count` as the filtered match count rather than a page count. It resends the same filters and page size with a cursor, and drops the cursor when a filter or the page size changes. Applied filters, page size, and cursor live in the browser query string, so refresh, a shared link, and browser history restore the same view. A date and time filter is entered and shown in the browser time zone and converted to a UTC RFC 3339 instant for the request; a local time that a daylight saving change skips is rejected in the browser instead of being shifted. Filter text is submitted literally, with case and interior spaces preserved; blank and whitespace-only text is omitted from the request rather than sent as an empty parameter. Editing an input changes nothing until the form is submitted. An unknown, repeated, or invalid query parameter in a restored link is reported without issuing a request, so a hand-edited link cannot silently widen a page. The three empty results are distinguished: no sessions recorded, no sessions matching the filters, and a page whose records have changed since the cursor was minted, which offers an explicit return to the newest page rather than restarting silently. A passing backend suite is not browser verification.
+The table configuration lives in `web/frontend/src/sessionColumns.tsx`:
 
-The implemented table configuration is `web/frontend/src/sessionColumns.tsx`. Its four columns request `started_at`, `status`, `metadata.invoked_by.email`, and `metadata.boundary`. Each definition supplies its header, required fields, and renderer. Changing columns requires a frontend rebuild, not a new API endpoint or a runtime column picker. A row opens a full, independent session-detail read and carries the current list query so a return restores the same filters and page. Keep partial-list validation separate from strict default-summary and full-detail validation.
+| Column | Requested field | Display |
+| --- | --- | --- |
+| Started at | `started_at` | Browser-local date and time |
+| Status | `status` | Raw API status token |
+| Invoked by | `metadata.invoked_by.email` | Email value, or `Not provided` when absent |
+| Boundary | `metadata.boundary` | Boundary value, or `Not provided` when absent |
+
+The list request repeats `fields` for these paths. It expects only the selected paths plus `session_id`; selected metadata is not a complete metadata document. Column selection is code configuration. It is not stored in the browser URL, and `fields` is not an accepted browser view parameter.
+
+Changing the table columns requires a frontend rebuild. It does not require a new API endpoint or a runtime column picker. Keep projected-list validation separate from strict default-summary and full-detail validation.
+
+The detail view fetches `GET /v1/sessions/{session_id}` and receives full `metadata` and `runs`, independently of the list selection. Encode the session ID as one URL path segment. Preserve backend field names and JSON types. Do not compute a frontend `execution_outcome` from runs.
+
+### Filters and drafts
+
+The filter panel maps its controls to the section 8 query parameters:
+
+| Control | Parameter | Browser behavior and API matching |
+| --- | --- | --- |
+| Status | `status` | Shows `All statuses`, `In progress`, `Completed`, and `Failed`. `All statuses` omits the parameter; the other choices send `IN_PROGRESS`, `COMPLETED`, or `FAILED`. |
+| Boundary | `boundary` | Sends nonblank text verbatim. Matches a literal substring without regard to case. |
+| Invoked by email | `invoked_by_email` | Sends nonblank text verbatim. Matches the complete value exactly and case-sensitively. It does not validate email syntax. |
+| Started from | `started_from` | Uses a local date and time input. Matches `started_at` greater than or equal to the resulting instant. |
+| Started before | `started_before` | Uses a local date and time input. Matches `started_at` strictly before the resulting instant. |
+
+Text filters accept at most 256 code points. Blank and whitespace-only form values are omitted. A nonblank value keeps surrounding spaces because the API treats them as literal text. An explicitly empty parameter in a restored URL is an error rather than an omitted filter.
+
+Selected metadata values are not restricted to strings. The table renders non-string values as JSON text and uses `Not provided` only when the selected path is absent.
+
+Input edits are drafts. They do not change the URL or issue a request until the user selects **Apply filters** or submits the form with Enter. Hiding the panel keeps the draft mounted. The filter badge counts applied filters, not draft values.
+
+**Clear filters** clears the draft and applied filters. It keeps the selected page size and drops the cursor, which returns the list to its newest page. A page-size change takes effect immediately and also drops the cursor. Paging continues with the applied filters when the panel contains an unsubmitted draft.
+
+For restored browser URLs, reject unknown, repeated, or explicitly empty parameters. Also reject unsupported status or page-size values, filter text that violates the supported bounds, timestamp text that fails the supported RFC 3339 parsing, and an invalid timestamp range without issuing a request. This keeps those errors from widening the list silently. Do not claim that the browser validates a cursor. It passes a nonempty cursor through unchanged so the API can validate its shape and filter and size fingerprint. Display a safe API error if the API rejects it.
+
+### Pagination and URL state
+
+The browser offers page sizes `25`, `50`, and `100`, with `25` as the default. This is a UI choice. The API range remains `1` through `100` as specified in section 8. The browser always sends the effective size to the API, but omits the default size from its own URL.
+
+The list uses `next_cursor` and `previous_cursor` from the page envelope. Cursors are opaque. There are no page numbers or offsets. The UI resends the applied filters and page size with a cursor.
+
+Applied filters, a nondefault page size, and the current cursor live in the browser query string. Refresh, shared links, and browser history restore those applied parameters. Draft inputs are not URL state. Filter values, including `invoked_by_email`, are visible in the address bar, shared links, and browser history. They may also appear in HTTP access logs. This POC adds no privacy protection for query parameters.
+
+`total_count` is the live count for the applied filters, not the number of rows on the current page. The count and rows come from separate reads and are not a snapshot. Writes and edits can make a traversal skip or repeat records.
+
+When `items` is empty, the view distinguishes these cases:
+
+- `total_count` is zero with no filters: no sessions have been recorded.
+- `total_count` is zero with filters: no sessions match the filters.
+- `items` is empty while `total_count` is positive: the cursor page changed. Offer **Return to newest sessions** and do not restart automatically.
+
+A same-tab row click or link carries the current list path in router state. **All sessions** uses that state to return to the applied filters, page size, and cursor. When router state is absent, as with a direct detail URL or a new-tab detail view, **All sessions** falls back to `/`.
+
+### Local time display and input
+
+Render session and run timestamps in the browser time zone. Name the resolved zone once in each view. Keep the API timestamp text in `dateTime` attributes and raw JSON disclosures.
+
+The date filters use native local date and time inputs with one-second steps. Convert an edited local value to one UTC RFC 3339 instant before adding it to the request. Do not parse a formatted table or detail value back into a request. Reject a local time skipped by a daylight saving clock change rather than shifting it.
+
+Storage and API response timestamps remain UTC. Local display does not rewrite them. Raw JSON and `dateTime` values keep the API text.
 
 Frontend `json.ts` parses integer source tokens outside the safe JavaScript number range into `bigint` and serializes them back as unquoted JSON numbers for display. Preserve ordinary floating-point semantics and leave numeric strings as strings. Use the exact-number formatter for metadata, outcomes, run details, and the full-response disclosure; do not pass these records to native `JSON.stringify` or coerce large integers to `number`.
 
@@ -1266,7 +1328,11 @@ Cover the known SPA routes, internal health, built asset MIME types, missing ass
 
 ### UI tests
 
-Use Vitest and the React testing library. Pin a fixed non-UTC time zone for the suite so local rendering and local-to-UTC conversion are asserted exactly rather than against the host zone. Cover loading, empty, and error states; unknown count rendering; local timestamps and the named zone; unrecognized verdict text; missing identity values; expandable metadata and details; and HTML-like stored text escaping. Assert the exact relative `/v1/sessions` and encoded `/v1/sessions/{session_id}` fetch paths, with no `/ui/api/*` calls. Cover the five-field page envelope and its rejection of a bare array; filter serialization, including omitted empty values and preserved literal text; local date bounds converted to UTC instants, an inverted range, and a local time skipped by a daylight saving change; drafts that issue no request until submitted; cursor navigation that keeps the applied filters, and the cursor reset on a filter or page-size change; restored links, including rejected unknown, repeated, and invalid parameters; browser history restoring applied filters; the three empty results; and the return from a detail view to the same filtered page. Cover non-OK API envelopes, non-JSON NGINX errors, and network failures without rendering raw HTML.
+Use Vitest and the React testing library under jsdom. Pin the main suite to `Asia/Kolkata` so local rendering and local-to-UTC conversion do not depend on the host zone. Keep separate conversion coverage under `America/New_York` for a skipped spring time and a repeated autumn time.
+
+Cover loading, empty, and error states; unknown count rendering; local timestamps and the named zone; unrecognized verdict text; missing identity values; expandable metadata and details; and HTML-like stored text escaping. Assert the exact relative `/v1/sessions` and encoded `/v1/sessions/{session_id}` fetch paths, with no `/ui/api/*` calls. Cover the five-field page envelope and its rejection of a bare array; configured field requests; filter serialization, including omitted empty values and preserved literal text; local date bounds converted to UTC instants, an inverted range, and a local time skipped by a daylight saving change; drafts that issue no request until submitted and remain mounted while the panel is hidden; supported browser page sizes; cursor navigation that keeps the applied filters, and the cursor reset on a filter or page-size change; restored links, including rejected unknown, repeated, and invalid parameters; browser history restoring applied filters; the three empty results; and the return from a detail view to the same filtered page. Cover non-OK API envelopes, non-JSON NGINX errors, and network failures without rendering raw HTML.
+
+The jsdom suite is not browser verification. Do not report browser behavior as verified unless the separate manual browser checks were performed.
 
 ### Composed smoke tests
 
