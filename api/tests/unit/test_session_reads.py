@@ -1,56 +1,16 @@
-from contextlib import asynccontextmanager
-from datetime import datetime, timedelta, timezone
-from types import SimpleNamespace
-from unittest.mock import AsyncMock
-
 import pytest
-from fastapi.testclient import TestClient
 
-from app.config import Settings
 from app.errors import ApplicationError, ErrorCode
-from app.main import create_app
-from app.repositories.protocols import RunRepository, SessionRepository
 from app.services.mapping import SESSION_SUMMARY_FIELDS
-
-SESSION_ID = "68df8b00aef4d8537282f001"
-RUN_ID = "68df8b00aef4d8537282f002"
-TIMESTAMP = datetime(2026, 10, 1, 11, 7, 4, 123456, tzinfo=timezone(timedelta(hours=2)))
-SERIALIZED_TIMESTAMP = "2026-10-01T09:07:04.123Z"
-INVALID_FIELD = {"error": {"code": "invalid_field", "message": "A request field is invalid."}}
-INTERNAL_ERROR = {
-    "error": {"code": "internal_error", "message": "The server could not complete the request."}
-}
-
-
-def summary_record():
-    return {
-        "session_id": SESSION_ID,
-        "schema_version": 1,
-        "started_at": TIMESTAMP,
-        "received_at": TIMESTAMP,
-        "status": "IN_PROGRESS",
-        "completion_time": None,
-        "last_step_executed": [],
-        "execution_outcome": None,
-    }
-
-
-@pytest.fixture
-def api_client(monkeypatch):
-    sessions = AsyncMock(spec=SessionRepository)
-    sessions.list_all.return_value = []
-    sessions.get.return_value = None
-    runs = AsyncMock(spec=RunRepository)
-    runs.list_for_session.return_value = []
-
-    @asynccontextmanager
-    async def fake_runtime(uri, database_name):
-        yield SimpleNamespace(sessions=sessions, runs=runs)
-
-    monkeypatch.setattr("app.main.mongo_runtime", fake_runtime)
-    settings = Settings(mongo_uri="mongodb://unit-test.invalid", mongo_db_name="unit")
-    with TestClient(create_app(settings)) as client:
-        yield client, sessions, runs
+from conftest import (
+    INTERNAL_ERROR,
+    INVALID_FIELD,
+    RUN_ID,
+    SERIALIZED_TIMESTAMP,
+    SESSION_ID,
+    TIMESTAMP,
+    summary_record,
+)
 
 
 def test_default_list_retains_exact_eight_field_response(api_client):
