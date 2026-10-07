@@ -39,6 +39,7 @@ api/
       __init__.py
       session_service.py
       run_service.py
+      session_listing.py
       mapping.py
     repositories/
       __init__.py
@@ -115,7 +116,7 @@ Build these capabilities:
 
 - Store session documents and run documents in separate MongoDB collections.
 - Accept session creation, run creation, and open-session partial updates.
-- List sessions and return one session with its runs.
+- List sessions as filtered, cursor-paginated pages, and return one session with its runs.
 - Render session lists and details in a client-side React application.
 - Serve the built React application from a Python FastAPI webserver.
 - Let React call the API directly through NGINX with same-origin relative URLs.
@@ -128,14 +129,15 @@ Do not add the following:
 - request body size caps in NGINX or either FastAPI application
 - CORS middleware as a security control
 - server-side rendering
-- pagination, result limits, silent truncation, result filtering, or search (list response field selection is allowed as specified in section 8)
+- free-text search, filtering on arbitrary metadata paths, silent truncation, or implicit result limits (the named list filters and explicit cursor pagination in section 8 are required)
+- offset or page-number pagination, jumping to an arbitrary page, or snapshot claims across page reads
 - retries, queues, sweepers, caches, Redis, or cross-collection transactions
 - idempotency keys, replay deduplication, optimistic counters, or alternate ID lookup
 - `PUT`, delete endpoints, generic CRUD bases, an ODM, Motor, or a separate business or domain layer
 - a dependency injection container, provider auto-registration, or speculative extension folders
 - automatic computation or verification of outcome counts
 
-The API is intentionally unauthenticated. Any host that can reach port 8080 can read and write `/v1/*`. Unlimited request and response bodies can consume application memory, network capacity, and disk. Do not reduce these risks by changing the approved POC contract. Document them in deployment instructions and keep production use out of scope.
+The API is intentionally unauthenticated. Any host that can reach port 8080 can read and write `/v1/*`. Unlimited request and response bodies can consume application memory, network capacity, and disk. Session detail responses remain unbounded in the size of one session and its runs. List pages are bounded by the page size, but an unauthenticated caller can still walk every page and can request a case-insensitive substring filter that the server evaluates without a supporting index. Do not reduce these risks by changing the approved POC contract. Document them in deployment instructions and keep production use out of scope.
 
 MongoDB still limits each final BSON document to 16 MiB. A session `PATCH` can cross this limit as metadata grows. Return `413` when that happens.
 
@@ -156,7 +158,7 @@ React fetches only these relative API paths:
 /v1/sessions/{session_id}
 ```
 
-List requests may append repeated `fields` query parameters as defined in section 8. Field selection uses the query string, not a GET request body.
+List requests may append repeated `fields` query parameters and the single-valued filter and paging parameters defined in section 8. Selection, filtering, and paging use the query string, not a GET request body.
 
 NGINX sends `/v1/*` to the API on container port 8000. It sends UI and asset requests to the web container on port 8080. The web container serves static React assets and its internal liveness route only. It does not call the API or MongoDB.
 
@@ -199,23 +201,63 @@ exception_handlers -> FastAPI and application exceptions
 
 Controllers own HTTP routing and translate validated inputs into service calls. Services own business rules and depend on narrow repository protocols. Repository adapters own persistence details. `domain.py` contains only shared enums, currently session status. Do not create a separate domain or business package.
 
-`ObjectId`, `bson`, MongoDB clients, cursors, filters, update operators, and pipeline syntax must stay in repository adapter files. `indexes.py` may contain MongoDB index definitions. Repository protocols may use primitive ID strings, dictionaries used as DTOs, and timezone-aware `datetime` values. They must not expose MongoDB clients, filters, cursors, or BSON IDs.
+`ObjectId`, `bson`, MongoDB clients, cursors, filters, update operators, and pipeline syntax must stay in repository adapter files. `indexes.py` may contain MongoDB index definitions. Repository protocols may use primitive ID strings, dictionaries used as DTOs, frozen dataclasses whose fields are primitives or other such dataclasses, and timezone-aware `datetime` values. They must not expose MongoDB clients, filters, cursors, projections, query operators, or BSON IDs.
 
 Repository identifier arguments are strings. An adapter must confirm that an identifier is a string before converting it, because `ObjectId(None)` generates a new identifier instead of failing and would silently target an unrelated document. `ObjectId` also accepts 12-byte values and existing `ObjectId` instances, which the string identifier contract does not allow. Keep this one conversion helper in `repositories/object_ids.py` and use it for every identifier the adapters parse. Treat any non-string value, including `None`, exactly like a malformed identifier string: session reads return no record, and session patch and run listing raise `session_not_found`. Reject the value before issuing any MongoDB operation.
 
 The protocols are real test seams. They let service tests use small fakes without importing MongoDB. Keep each protocol limited to operations the service currently needs. Do not introduce generic repositories. Define these exact operations in `protocols.py`:
 
 ```python
-from typing import Any, Mapping, Protocol, TypeAlias
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Any, Literal, Protocol, TypeAlias
 
 SessionRecord: TypeAlias = dict[str, Any]
 RunRecord: TypeAlias = dict[str, Any]
+
+PageDirection: TypeAlias = Literal["next", "previous"]
+
+@dataclass(frozen=True, slots=True)
+class SessionFilters:
+    status: str | None = None
+    started_from: datetime | None = None
+    started_before: datetime | None = None
+    boundary_contains: str | None = None
+    invoked_by_email: str | None = None
+
+@dataclass(frozen=True, slots=True)
+class PagePosition:
+    started_at: datetime
+    session_id: str
+    direction: PageDirection
+
+@dataclass(frozen=True, slots=True)
+class SessionListQuery:
+    fields: tuple[str, ...]
+    page_size: int
+    filters: SessionFilters = field(default_factory=SessionFilters)
+    position: PagePosition | None = None
+
+@dataclass(frozen=True, slots=True)
+class PageAnchor:
+    started_at: datetime
+    session_id: str
+
+@dataclass(frozen=True, slots=True)
+class SessionPage:
+    items: list[SessionRecord]
+    total_count: int
+    newest: PageAnchor | None = None
+    oldest: PageAnchor | None = None
+    has_newer: bool = False
+    has_older: bool = False
 
 class SessionRepository(Protocol):
     async def create(self, values: Mapping[str, Any]) -> str: ...
     async def exists(self, session_id: str) -> bool: ...
     async def get(self, session_id: str) -> SessionRecord | None: ...
-    async def list_all(self, fields: tuple[str, ...]) -> list[SessionRecord]: ...
+    async def list_page(self, query: SessionListQuery) -> SessionPage: ...
     async def patch_open_session(
         self,
         session_id: str,
@@ -232,9 +274,11 @@ class RunRepository(Protocol):
     async def list_for_session(self, session_id: str) -> list[RunRecord]: ...
 ```
 
-The record dictionaries are application DTOs. Their IDs are strings and their timestamps are Python datetimes. They never contain ObjectIds, clients, cursors, filters, or MongoDB operators.
+The record dictionaries are application DTOs. Their IDs are strings and their timestamps are Python datetimes. They never contain ObjectIds, clients, cursors, filters, or MongoDB operators. `SessionFilters` text values are literal search values, never patterns or expressions; the adapter escapes them.
 
-For list reads, the service resolves the default fields or validates and normalizes supplied field paths before calling `list_all`. The tuple contains application field paths, not a database projection. It always includes `session_id`. Only the adapter maps this ID to `_id` and constructs the inclusion projection.
+`PageAnchor` reports the sort key of a returned record separately from the record itself, because the sort key is not necessarily a selected response field. `has_newer` and `has_older` report only whether a further page exists in each direction at read time.
+
+For list reads, the service validates every query parameter before calling `list_page`. It resolves the default fields or normalizes supplied field paths, normalizes filters into `SessionFilters`, resolves the page size, and decodes any supplied cursor into a `PagePosition`. The `fields` tuple contains application field paths, not a database projection, and always includes `session_id`. Only the adapter maps this ID to `_id`, constructs the inclusion projection, and builds filter, boundary, and sort expressions.
 
 Use this call mapping:
 
@@ -243,10 +287,10 @@ Use this call mapping:
 | Create session | `SessionService.create_session` | `SessionRepository.create` |
 | Create run | `RunService.create_run` | `SessionRepository.exists`, then `RunRepository.create` |
 | Patch session | `SessionService.patch_session` | `SessionRepository.patch_open_session` |
-| List sessions | `SessionService.list_sessions` | `SessionRepository.list_all` |
+| List sessions | `SessionService.list_sessions` | `SessionRepository.list_page` |
 | Get session detail | `SessionService.get_session` | `SessionRepository.get`, then `RunRepository.list_for_session` |
 
-Services and `mapping.py` validate and partition values. Services set `schema_version`, initial status fields, and `received_at`. `RunService.create_run` checks parent existence before insertion, regardless of parent status. Repositories generate ObjectIds, copy inputs, issue database operations, apply read sorting, and map stored BSON to application DTOs. Do not duplicate business checks in adapters.
+Services and `mapping.py` validate and partition values. `session_listing.py` owns list query validation, page size resolution, the cursor codec, and the result envelope assembly; it holds no MongoDB syntax. Services set `schema_version`, initial status fields, and `received_at`. `RunService.create_run` checks parent existence before insertion, regardless of parent status. Repositories generate ObjectIds, copy inputs, issue database operations, build filter, boundary, and sort expressions, escape literal filter text, and map stored BSON to application DTOs. Do not duplicate business checks in adapters.
 
 `repositories/mongo_runtime.py` owns the PyMongo client, database handle, ping, index startup, and shutdown. Its factory constructs the client exactly as follows, using values from settings:
 
@@ -606,35 +650,49 @@ GET /v1/sessions
 Response after the worked lifecycle above, `200 OK`:
 
 ```json
-[
-  {
-    "session_id": "68df8b00aef4d8537282f001",
-    "schema_version": 1,
-    "started_at": "2026-10-01T09:07:04.000Z",
-    "received_at": "2026-10-01T09:07:05.123Z",
-    "status": "COMPLETED",
-    "completion_time": "2026-10-01T09:18:04.000Z",
-    "last_step_executed": [
-      "pair-actions"
-    ],
-    "execution_outcome": {
-      "defect_count": 2,
-      "gap_count": 1,
-      "contract_ingredient_count": 14
+{
+  "items": [
+    {
+      "session_id": "68df8b00aef4d8537282f001",
+      "schema_version": 1,
+      "started_at": "2026-10-01T09:07:04.000Z",
+      "received_at": "2026-10-01T09:07:05.123Z",
+      "status": "COMPLETED",
+      "completion_time": "2026-10-01T09:18:04.000Z",
+      "last_step_executed": [
+        "pair-actions"
+      ],
+      "execution_outcome": {
+        "defect_count": 2,
+        "gap_count": 1,
+        "contract_ingredient_count": 14
+      }
     }
-  }
-]
+  ],
+  "page_size": 25,
+  "total_count": 1,
+  "next_cursor": null,
+  "previous_cursor": null
+}
 ```
 
 An empty result is a `200 OK` response with this body:
 
 ```json
-[]
+{
+  "items": [],
+  "page_size": 25,
+  "total_count": 0,
+  "next_cursor": null,
+  "previous_cursor": null
+}
 ```
 
-There is no pagination, limit, continuation token, or truncation. Sort by `started_at` descending, then `_id` descending.
+Every list response is this envelope. It has exactly these five fields and no others. `items` is the page, in `started_at` descending then `_id` descending order. This replaces the previous unpaginated array response; a client that expects a bare JSON array must be updated.
 
-With no `fields` parameter, each summary contains only this root allowlist. Exclude both `metadata` and `runs`:
+Sort by `started_at` descending, then `_id` descending, always. There is no client-selectable sort field or direction.
+
+With no `fields` parameter, each item contains only this root allowlist. Exclude both `metadata` and `runs`:
 
 ```text
 session_id
@@ -660,16 +718,22 @@ GET /v1/sessions?fields=started_at&fields=metadata.invoked_by.name&fields=metada
 Example response, `200 OK`:
 
 ```json
-[
-  {
-    "session_id": "68df8b00aef4d8537282f001",
-    "started_at": "2026-10-01T09:07:04.000Z",
-    "metadata": {
-      "invoked_by": {"name": "Example operator"},
-      "boundary": "example-service"
+{
+  "items": [
+    {
+      "session_id": "68df8b00aef4d8537282f001",
+      "started_at": "2026-10-01T09:07:04.000Z",
+      "metadata": {
+        "invoked_by": {"name": "Example operator"},
+        "boundary": "example-service"
+      }
     }
-  }
-]
+  ],
+  "page_size": 25,
+  "total_count": 1,
+  "next_cursor": null,
+  "previous_cursor": null
+}
 ```
 
 - Always return `session_id`, including for `?fields=session_id`, which returns ID-only records.
@@ -678,12 +742,64 @@ Example response, `200 OK`:
 - Reject unknown roots, descendants of non-container root fields, empty selectors or path components, NUL, invalid UTF-8, and dollar-prefixed path components with `400 invalid_field`. Validate all selectors before deduplication or collapsing parent/child overlaps; a valid parent must not conceal an invalid child.
 - Deduplicate paths and collapse descendants when their parent is selected. The response contains no unrequested root fields other than the mandatory ID. Do not add application defaults for omitted fields. Preserve empty objects already returned by the database projection, such as `metadata: {}` when a selected leaf is absent.
 - Use MongoDB's nested inclusion-projection semantics for arrays and missing or non-object intermediate values; do not implement a second projection engine in application code. A missing selected leaf is not synthesized. A selected value that is explicitly null stays null.
-- Return the same unbounded session set in the same `started_at` descending, `_id` descending order, even when those sort fields are not selected. This is field selection, not record filtering.
+- Selection changes neither membership nor ordering. The same filtered set is returned in the same `started_at` descending, `_id` descending order, even when the sort fields are not selected.
+- Always project the sort key so a cursor can be minted, and remove it from the returned record when it was not selected. An ID-only page must not leak `started_at`.
 - Validate and serialize only the fields present in a projected response. Present non-nullable root fields remain strict and non-nullable. Serialize selected root timestamps with exactly milliseconds and `Z`, as in the default response. Keep default-summary and full-detail validation strict and independent.
 
 Keep the full detail projection fixed and separate from request-specific list projections. Do not inherit nested selections into the detail projection: selecting both `metadata` and one of its descendants can cause a database path collision. Field selection changes only reads and responses, not the stored shape, indexes, or `schema_version`.
 
-Selecting full `metadata` can substantially increase memory use and response sizes across an unbounded list. The existing unauthenticated-access and unbounded-read risks still apply; do not introduce hidden limits to compensate.
+Selecting full `metadata` substantially increases memory use and response size for each page. The page size bounds one response but not the number of pages a caller may walk. The existing unauthenticated-access risk still applies; do not introduce hidden limits to compensate.
+
+#### Filtering
+
+Every filter is a single-valued query parameter. Repeating one is a request error, not a set of alternatives. Supplied filters combine conjunctively.
+
+| Parameter | Rule |
+| --- | --- |
+| `status` | Exactly `IN_PROGRESS`, `COMPLETED`, or `FAILED`. |
+| `started_from` | Aware RFC 3339 string. Matches `started_at` greater than or equal to it. |
+| `started_before` | Aware RFC 3339 string. Matches `started_at` strictly less than it. |
+| `boundary` | Literal text. Matches `metadata.boundary` containing it, ignoring case. |
+| `invoked_by_email` | Literal text. Matches `metadata.invoked_by.email` exactly, including case. |
+
+Validation rules:
+
+- Reject an unknown status value, an unparseable timestamp, empty filter text, NUL, invalid UTF-8, and filter text longer than 256 characters with `400 invalid_field`. The bound keeps an oversized value a request error rather than a database expression limit. It applies only to these query parameters and does not cap any stored value.
+- The timestamp range is start-inclusive and end-exclusive so adjacent windows neither overlap nor skip. Reject a supplied `started_from` that is greater than or equal to a supplied `started_before`.
+- Either timestamp bound may be supplied alone. Normalize both to UTC milliseconds using the same parser as request bodies.
+- Reject any unknown query parameter with `400 invalid_field`. Do not ignore it. A misspelled filter must not silently return a wider page.
+- Validate every filter in the service before any repository call.
+
+Metadata filter semantics:
+
+- `boundary` and `invoked_by_email` are the only metadata paths that may be filtered. Do not add filtering on other metadata paths, on arbitrary client-supplied paths, or on `execution_outcome`.
+- Filter text is a literal value, never a pattern. The adapter escapes it before building any regular expression, so `.`, `*`, and `$` match themselves.
+- A supplied text filter matches only a genuine scalar string at the path. A missing value, null, number, object, or array never matches. MongoDB would otherwise match an array element through ordinary path traversal, so the adapter additionally requires a non-array value at `metadata.boundary`, at `metadata.invoked_by`, and at `metadata.invoked_by.email`.
+- Filtering reads stored values; it does not evaluate, index, rewrite, or reinterpret them. Supplying a filter value such as `$status` matches that literal text. Filtering does not change the stored shape or `schema_version`.
+
+#### Pagination
+
+Paging is cursor-based and always on. Navigation is next and previous only; there is no page number, offset, or jump to an arbitrary page.
+
+| Parameter | Rule |
+| --- | --- |
+| `page_size` | Integer from 1 through 100. Defaults to 25. Strict digits only; reject padding, signs, separators, and decimals. |
+| `cursor` | An opaque continuation value returned by a previous response. |
+
+```text
+GET /v1/sessions?status=COMPLETED&boundary=payments&page_size=25
+GET /v1/sessions?status=COMPLETED&boundary=payments&page_size=25&cursor=djF8bmV4dHwx
+```
+
+- `items` contains at most `page_size` records.
+- `page_size` echoes the effective page size.
+- `total_count` is the exact number of records matching the filters, independent of the cursor and the returned page. It comes from a separate count read, so the count and the page can disagree while sessions are being written. This is not a snapshot.
+- `next_cursor` continues toward older sessions. `previous_cursor` returns toward newer sessions. Either is null when no further page exists in that direction at read time.
+- The page boundary is the `(started_at, _id)` sort key of the first or last returned record and is exclusive. Read one record beyond the page size to decide whether the travelled direction continues. Determine the opposite direction with its own existence check rather than assuming it, because the anchored record may no longer match the filters.
+- Reading backward sorts ascending from the boundary and then restores the response to newest-first order.
+- A cursor is a continuation value, not a credential. It is not signed and carries no secret. It encodes a version, the direction, the boundary sort key, and a fingerprint of the filters and page size. Reject a cursor with an unexpected alphabet, length, structure, version, direction, or identifier shape, and reject one whose fingerprint does not match the current request, all with `400 invalid_field`. Validate the cursor before issuing any database operation. A different `fields` selection is allowed with the same cursor because selection changes neither membership nor ordering.
+- `started_at` is mutable while a session is open. Editing it, or editing a value a filter matches, can move a session between pages, so a full traversal can skip or repeat a record. Accept this; do not add snapshots, server-side cursor state, or compensating locks.
+- A valid cursor whose remaining matches have disappeared returns an empty `items` array, both cursors null, and the current `total_count`. Do not return `404` and do not silently restart from the first page.
 
 ### `GET /v1/sessions/{session_id}`
 
@@ -763,7 +879,7 @@ Use two queries: one for the session and one for its runs. Do not use `$lookup` 
 
 The two reads are not a snapshot. A run can be inserted after the session query, after terminal completion, or after a detail response. This is deliberate.
 
-Both read endpoints are unbounded. They can consume significant API, browser, and network memory. Do not add implicit limits or hide omitted results.
+The detail endpoint is unbounded in the size of one session and its runs. It has no pagination, field selection, or implicit limit. It can consume significant API, browser, and network memory. Do not add implicit limits or hide omitted runs.
 
 ## 9. Errors and HTTP binding
 
@@ -790,7 +906,7 @@ Use these codes where applicable:
 | 400 | `invalid_body` | `Request body must be a JSON object.` | JSON root is not an object |
 | 400 | `forbidden_field` | `Request contains a reserved top-level field.` | Reserved top-level input field |
 | 400 | `missing_field` | `A required field is missing.` | Required field absent |
-| 400 | `invalid_field` | `A request field is invalid.` | Known field fails validation or BSON representation |
+| 400 | `invalid_field` | `A request field is invalid.` | Known field fails validation or BSON representation, or a list query parameter is unknown, repeated, or invalid |
 | 400 | `timestamp_conflict` | `Provide exactly one of at or occurred_at.` | Both run timestamp aliases supplied |
 | 400 | `invalid_key` | `Object keys must not contain NUL.` | NUL found in an object key |
 | 400 | `payload_too_deep` | `The stored document would exceed 100 nesting levels.` | Final BSON nesting would exceed 100 levels |
@@ -805,6 +921,8 @@ Use these codes where applicable:
 | 500 | `internal_error` | `The server could not complete the request.` | Sanitized unexpected server or database failure |
 
 Override FastAPI `RequestValidationError` to `400`, mapped to a stable application envelope. Choose `missing_field` when the first deterministic validation issue is an absent required field. Use `invalid_field` for other model validation failures.
+
+List query parameters reuse `invalid_field`. Do not add a separate code for an invalid filter, page size, or cursor, and never echo the supplied value or say which parameter failed in a way that reflects input text back to the caller.
 
 Rewrite `StarletteHTTPException` into the same envelope while preserving its status. Use distinct codes such as `route_not_found`, `method_not_allowed`, and `unsupported_media_type`. Preserve the `Allow` header on `405`. Do not turn every framework exception into `400`.
 
@@ -894,6 +1012,8 @@ runs_session_occurred_idx
 
 MongoDB supplies the unique `_id` indexes. Do not add indexes on extras, agent IDs, status, or other fields. Do not add uniqueness for legacy IDs.
 
+`sessions_started_desc_idx` also serves list pagination: it covers the sort order and the `(started_at, _id)` boundary comparison. List filters are deliberately unindexed. At the POC scale of fewer than ten thousand sessions a filtered page is a scan over the sorted index, and a case-insensitive substring filter could not use an ordinary index anyway. Measure representative queries before proposing a new index, and treat any addition as a deliberate index change under the rule below.
+
 An index definition change requires a deliberate migration or a new name. Startup must not automatically drop or replace an existing index.
 
 ## 11. Static web server and React application
@@ -939,7 +1059,9 @@ The React app provides:
 - UTC timestamp display
 - read-only expandable JSON for `metadata` and each run's `details`
 
-The list view fetches `GET /v1/sessions`. Without field selection it receives the eight root fields in section 8 and no `metadata` or `runs`. A list view may request repeated `fields` parameters for its columns and must then expect only those selected paths plus `session_id`; selected metadata is not necessarily complete. The detail view fetches `GET /v1/sessions/{session_id}` and receives full `metadata` and `runs`, independently of list selections. Encode the session ID as one URL path segment before constructing the detail URL. Preserve backend field names and JSON types. Do not compute a frontend `execution_outcome` from runs.
+The list view fetches `GET /v1/sessions`. Every list response is the page envelope in section 8, so the view reads its rows from `items`. Without field selection those rows carry the eight root fields and no `metadata` or `runs`. A list view may request repeated `fields` parameters for its columns and must then expect only those selected paths plus `session_id`; selected metadata is not necessarily complete. The detail view fetches `GET /v1/sessions/{session_id}` and receives full `metadata` and `runs`, independently of list selections. Encode the session ID as one URL path segment before constructing the detail URL. Preserve backend field names and JSON types. Do not compute a frontend `execution_outcome` from runs.
+
+The browser filter and pagination controls are deliberately deferred. Until they land, the list view sends no filter, `page_size`, or `cursor` parameter and therefore shows only the newest default page. The React application is the only consumer that must change to adopt the envelope; plan that work separately and do not treat a passing backend suite as browser verification. When those controls are added, they must send the section 8 parameters verbatim, read navigation state only from `next_cursor` and `previous_cursor`, display `total_count` as the filtered match count rather than a page count, and resend the same filters and page size with a cursor. Changing a filter or the page size must drop the current cursor and return to the newest page.
 
 The implemented table configuration is `web/frontend/src/sessionColumns.tsx`. Its initial three columns request `started_at`, `metadata.invoked_by.name`, and `metadata.boundary`. Each definition supplies its header, required fields, and renderer. Changing columns requires a frontend rebuild, not a new API endpoint or a runtime column picker. A row opens a full, independent session-detail read. Keep partial-list validation separate from strict default-summary and full-detail validation.
 
@@ -1099,11 +1221,19 @@ Cover at least these cases:
 - A real oversize insert returns `413`.
 - Cumulative metadata growth by patch returns `413` and leaves the prior document unchanged.
 - Non-finite numbers, huge integers, NUL keys, parse recursion, and final depth over 100 return `400` with the intended code.
-- Session lists are unbounded and send no hidden pagination query.
-- Default session lists retain exactly the eight root fields and exclude metadata and runs.
+- Session lists always return the five-field page envelope, never a bare array.
+- Default session list items retain exactly the eight root fields and exclude metadata and runs.
 - Repeated list `fields` selectors select nested values while always returning `session_id`. ID-only and empty-result requests work without loading full documents or querying runs.
 - Invalid field selectors return sanitized `400 invalid_field` before any repository call. Validate invalid children even when a valid parent is also selected.
-- Duplicate and overlapping paths collapse without confusing siblings such as `metadata.a` and `metadata.ab`. Selection does not change ordering or add limits.
+- Duplicate and overlapping paths collapse without confusing siblings such as `metadata.a` and `metadata.ab`. Selection changes neither ordering nor membership.
+- Each filter builds its documented predicate, and supplied filters combine conjunctively.
+- Unknown, repeated, and invalid list query parameters return sanitized `400 invalid_field` before any repository call, including unknown statuses, unparseable or inverted timestamp bounds, empty or oversized filter text, and non-strict page sizes.
+- Page size defaults to 25, accepts 1 through 100, and bounds the returned items.
+- `total_count` reflects every filter match and is independent of the cursor and the page.
+- Forward traversal visits every matching session exactly once on unchanged data, including when sessions share a `started_at` value, and a previous cursor returns the preceding page.
+- A projected page still mints working cursors, and an ID-only page does not leak `started_at`.
+- Cursors are rejected when malformed, tampered, version-mismatched, unrepresentable, or reused with different filters or page size, and are accepted with a different `fields` selection.
+- A valid cursor whose matches have disappeared returns an empty terminal page with the live total.
 - Selected nulls and missing values remain distinct. Selected root timestamps retain UTC millisecond formatting; complete selected parents preserve special keys and large integers.
 - A projected list read does not narrow later list or detail reads. Default and detail responses still reject incomplete or invalid repository records.
 - Detail reads use separate queries and make no snapshot claim.
@@ -1117,6 +1247,14 @@ The MongoDB integration suite pins these behaviors against the chosen image and 
 - empty patch returns `200` based on `matched_count`
 - server-side oversize codes used by the pinned MongoDB version map correctly
 - the deployed write concern is acknowledged, so inserted identifiers and `matched_count` are reported
+- the boundary filter matches literal text without regard to case, and an escaped value does not match as a pattern
+- a text filter matches only a genuine scalar string, so missing, null, numeric, object, and array values never match, including an array of identity objects that path traversal would otherwise reach
+- an operator-shaped filter value such as `$status` is treated as data
+- `status` and the half-open timestamp range select their documented sets, and combined filters narrow conjunctively
+- forward traversal visits every matching session exactly once with repeated `started_at` values, and ties order by descending identifier
+- a previous cursor returns the preceding page and the newest page offers no previous cursor
+- an ID-only page does not leak the sort key, and selected metadata paths survive a filtered page
+- `total_count` covers all matches rather than the returned page
 
 ### Static webserver tests
 
@@ -1132,7 +1270,7 @@ Use Vitest and the React testing library. Cover loading, empty, and error states
 
 Run HTTP smoke tests through NGINX. Verify `/v1` routing, known UI routes, unknown route behavior, missing assets, public host binding, and that API and web health routes are internal while edge `/healthz` is `404`.
 
-`scripts/smoke.py` performs GET-only deployment checks. Require root/deep-link HTML, discover and fetch same-origin `/assets/` scripts/styles with correct MIME types, check selected and ID-only session lists, and reject an invalid selector even on an empty database. When a session exists, check one complete detail response. Do not compare separate reads as snapshots or print record contents. Reject redirects and unexpected response types. Edge `404` responses need not be JSON. Cover smoke failures with `python3 -m unittest discover -s scripts/tests -v`.
+`scripts/smoke.py` performs GET-only deployment checks. Require root/deep-link HTML, discover and fetch same-origin `/assets/` scripts/styles with correct MIME types, check selected, ID-only, and filtered session pages against the five-field envelope, and reject both an invalid selector and an invalid list parameter even on an empty database. When a session exists, check one complete detail response. Do not compare separate reads as snapshots or print record contents. Reject redirects, unexpected response types, and a bare array list response. Edge `404` responses need not be JSON. Cover smoke failures with `python3 -m unittest discover -s scripts/tests -v`.
 
 HTTP smoke checks do not execute React. Separately verify in a browser that the table or empty state renders, and that row navigation and full details work when data exists. Do not claim browser verification from HTTP status checks alone.
 
@@ -1212,7 +1350,7 @@ After deployment, run the root smoke command:
 python3 scripts/smoke.py --base-url http://localhost:8080
 ```
 
-The fixture web tests, image tests, frontend unit/interaction tests, API unit tests, and HTTP smoke workflow have executable files in the worktree. The guarded real-Mongo integration suite, Compose test overlay, run-creation endpoint, and API request-correlation middleware remain separate planned work. Do not describe those capabilities as verified by frontend deployment checks.
+The fixture web tests, image tests, frontend unit/interaction tests, API unit tests, the guarded list-query integration suite, and the HTTP smoke workflow have executable files in the worktree. The remaining guarded real-Mongo coverage for oversize writes and write concern, the Compose test overlay, the run-creation endpoint, API request-correlation middleware, and the browser filter and pagination controls remain separate planned work. Do not describe those capabilities as verified by frontend deployment checks.
 
 Implement in small, reversible stages:
 

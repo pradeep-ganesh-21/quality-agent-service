@@ -20,7 +20,9 @@ spec.loader.exec_module(smoke)
 
 SELECTED = "/v1/sessions?fields=started_at&fields=metadata.invoked_by.name&fields=metadata.boundary"
 IDS = "/v1/sessions?fields=session_id"
+FILTERED = "/v1/sessions?fields=session_id&status=COMPLETED&page_size=1"
 INVALID = "/v1/sessions?fields=runs"
+INVALID_PARAMETER = "/v1/sessions?page_size=0"
 SESSION_ID = "68df8b00aef4d8537282f001"
 OTHER_ID = "68df8b00aef4d8537282f099"
 JS = "/assets/index-Bs7_9abc.js"
@@ -29,6 +31,18 @@ HTML = (
     '<!doctype html><html><head><link rel="stylesheet" href="' + CSS + '"></head>'
     '<body><div id="root"></div><script crossorigin src="' + JS + '" type="module"></script></body></html>'
 )
+INVALID_FIELD = {"error": {"code": "invalid_field", "message": "A request field is invalid."}}
+
+
+def page(items, page_size=25, total_count=None, next_cursor=None, previous_cursor=None):
+    return {
+        "items": items,
+        "page_size": page_size,
+        "total_count": len(items) if total_count is None else total_count,
+        "next_cursor": next_cursor,
+        "previous_cursor": previous_cursor,
+    }
+
 
 
 def response(body, status=200, mime="text/html; charset=utf-8", headers=None):
@@ -83,9 +97,11 @@ class SmokeTests(unittest.TestCase):
             JS: response("console.log('fixture');", mime="text/javascript; charset=utf-8"),
             CSS: response("body { color: black; }", mime="text/css"),
             "/sessions/000000000000000000000000": response(HTML),
-            SELECTED: json_response([]),
-            IDS: json_response([]),
-            INVALID: json_response({"error": {"code": "invalid_field", "message": "A request field is invalid."}}, 400),
+            SELECTED: json_response(page([])),
+            IDS: json_response(page([])),
+            FILTERED: json_response(page([], page_size=1)),
+            INVALID: json_response(INVALID_FIELD, 400),
+            INVALID_PARAMETER: json_response(INVALID_FIELD, 400),
             "/v1/__smoke_missing__": json_response({"error": {"code": "route_not_found", "message": "Route not found."}}, 404),
         }
         for path in (
@@ -122,11 +138,14 @@ class SmokeTests(unittest.TestCase):
                 "details": {"$data.key": [None, "private-secret"]},
             }],
         }
-        self.server.routes[SELECTED] = json_response([{
+        self.server.routes[SELECTED] = json_response(page([{
             "session_id": SESSION_ID, "started_at": "2026-09-01T09:07:04.000Z", "metadata": {},
-        }])
+        }]))
         # A concurrent insert can change the independently read ID-only list.
-        self.server.routes[IDS] = json_response([{"session_id": OTHER_ID}, {"session_id": SESSION_ID}])
+        self.server.routes[IDS] = json_response(
+            page([{"session_id": OTHER_ID}, {"session_id": SESSION_ID}], total_count=9,
+                 next_cursor="djF8bmV4dHwwfA", previous_cursor=None)
+        )
         self.server.routes["/sessions/" + SESSION_ID] = response(HTML)
         self.server.routes["/v1/sessions/" + SESSION_ID] = json_response(detail)
         return detail
@@ -150,8 +169,8 @@ class SmokeTests(unittest.TestCase):
     def test_session_appearing_between_lists_still_gets_detail(self):
         detail = self.populated()
         detail["runs"] = []
-        self.server.routes[SELECTED] = json_response([])
-        self.server.routes[IDS] = json_response([{"session_id": SESSION_ID}])
+        self.server.routes[SELECTED] = json_response(page([]))
+        self.server.routes[IDS] = json_response(page([{"session_id": SESSION_ID}]))
         self.server.routes["/v1/sessions/" + SESSION_ID] = json_response(detail)
         result, output = self.invoke()
         self.assertEqual(result, 0, output)
@@ -228,18 +247,50 @@ class SmokeTests(unittest.TestCase):
             self.server.routes[path] = original
 
     def test_old_api_ignoring_invalid_fields_fails_even_on_empty_database(self):
-        self.server.routes[INVALID] = json_response([])
+        self.server.routes[INVALID] = json_response(page([]))
         self.assert_failure("Invalid list selector")
 
-    def test_selected_list_requires_array_valid_ids_and_selected_roots(self):
+    def test_old_api_ignoring_unknown_parameters_fails(self):
+        self.server.routes[INVALID_PARAMETER] = json_response(page([]))
+        self.assert_failure("Invalid list parameter")
+
+    def test_unpaginated_list_responses_are_rejected(self):
+        for path, label in ((SELECTED, "Selected list"), (IDS, "ID-only list"), (FILTERED, "Filtered list")):
+            good = self.server.routes[path]
+            with self.subTest(path=path):
+                self.server.routes[path] = json_response([])
+                self.assert_failure(label)
+            self.server.routes[path] = good
+
+    def test_page_envelope_requires_valid_bounds_counts_and_cursors(self):
         for payload in (
-            {}, None, "private-secret", [None], [{}], [{"session_id": "https://example.invalid/private-secret"}],
-            [{"session_id": SESSION_ID, "runs": []}], [{"session_id": SESSION_ID, "private-key": "private-secret"}],
-            [{"session_id": SESSION_ID, "status": "COMPLETED"}],
-            [{"session_id": SESSION_ID, "started_at": None}], [{"session_id": SESSION_ID, "metadata": []}],
+            page([], page_size=0), page([], page_size=101), page([], page_size="25"),
+            page([], total_count=-1), page([], total_count=1.0),
+            page([], next_cursor="not base64"), page([], next_cursor=""),
+            page([], previous_cursor={"cursor": "private-secret"}),
+            page([{"session_id": SESSION_ID}, {"session_id": OTHER_ID}], page_size=1),
+            {"items": []},
+            dict(page([]), extra="private-secret"),
+            dict(page([]), items={"session_id": SESSION_ID}),
         ):
             with self.subTest(payload=payload):
                 self.server.routes[SELECTED] = json_response(payload)
+                self.assert_failure("Selected list", ("private-secret",))
+
+    def test_selected_list_requires_valid_ids_and_selected_roots(self):
+        for rows in (
+            None, "private-secret", [None], [{}],
+            [{"session_id": "https://example.invalid/private-secret"}],
+            [{"session_id": SESSION_ID, "runs": []}],
+            [{"session_id": SESSION_ID, "private-key": "private-secret"}],
+            [{"session_id": SESSION_ID, "status": "COMPLETED"}],
+            [{"session_id": SESSION_ID, "started_at": None}],
+            [{"session_id": SESSION_ID, "metadata": []}],
+        ):
+            with self.subTest(rows=rows):
+                self.server.routes[SELECTED] = json_response(
+                    dict(page([]), items=rows, total_count=1)
+                )
                 self.assert_failure("Selected list", ("private-key", "private-secret", "example.invalid"))
 
     def test_selected_values_can_be_missing_null_or_nonobject_intermediates(self):
@@ -251,12 +302,12 @@ class SmokeTests(unittest.TestCase):
             {"session_id": SESSION_ID, "metadata": {"invoked_by": "arbitrary-value"}},
         ):
             with self.subTest(row=row):
-                self.server.routes[SELECTED] = json_response([row])
+                self.server.routes[SELECTED] = json_response(page([row]))
                 result, output = self.invoke()
                 self.assertEqual(result, 0, output)
 
     def test_id_only_list_rejects_extra_fields(self):
-        self.server.routes[IDS] = json_response([{"session_id": SESSION_ID, "metadata": {}}])
+        self.server.routes[IDS] = json_response(page([{"session_id": SESSION_ID, "metadata": {}}]))
         self.assert_failure("ID-only list")
 
     def test_timestamps_match_the_browser_contract(self):
@@ -269,9 +320,11 @@ class SmokeTests(unittest.TestCase):
             for target in ("selected", "started_at", "received_at", "completion_time", "run_occurred_at", "run_received_at"):
                 with self.subTest(target=target, value=invalid):
                     changed = copy.deepcopy(detail)
-                    self.server.routes[SELECTED] = json_response([{"session_id": SESSION_ID}])
+                    self.server.routes[SELECTED] = json_response(page([{"session_id": SESSION_ID}]))
                     if target == "selected":
-                        self.server.routes[SELECTED] = json_response([{"session_id": SESSION_ID, "started_at": invalid}])
+                        self.server.routes[SELECTED] = json_response(
+                            page([{"session_id": SESSION_ID, "started_at": invalid}])
+                        )
                     elif target.startswith("run_"):
                         changed["runs"][0][target[4:]] = invalid
                     else:

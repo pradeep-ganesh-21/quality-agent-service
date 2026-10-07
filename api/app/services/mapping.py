@@ -69,7 +69,7 @@ def normalize_session_fields(fields: Sequence[str] | None) -> tuple[str, ...]:
     for field in fields:
         if not isinstance(field, str):
             raise ApplicationError(ErrorCode.INVALID_FIELD)
-        _validate_utf8(field)
+        validate_utf8(field)
         parts = tuple(field.split("."))
         if (
             parts[0] not in _SELECTABLE_SESSION_ROOTS
@@ -114,12 +114,12 @@ def validate_json_values(body: dict[str, Any]) -> None:
             for key, child in value.items():
                 if "\x00" in key:
                     raise ApplicationError(ErrorCode.INVALID_KEY)
-                _validate_utf8(key)
+                validate_utf8(key)
                 pending.append(child)
         elif isinstance(value, list):
             pending.extend(value)
         elif isinstance(value, str):
-            _validate_utf8(value)
+            validate_utf8(value)
         elif isinstance(value, int) and not isinstance(value, bool):
             if not -(2**63) <= value < 2**63:
                 raise ApplicationError(ErrorCode.VALUE_OUT_OF_RANGE)
@@ -127,7 +127,7 @@ def validate_json_values(body: dict[str, Any]) -> None:
             raise ApplicationError(ErrorCode.NON_FINITE_NUMBER)
 
 
-def _validate_utf8(value: str) -> None:
+def validate_utf8(value: str) -> None:
     try:
         value.encode("utf-8")
     except UnicodeEncodeError:

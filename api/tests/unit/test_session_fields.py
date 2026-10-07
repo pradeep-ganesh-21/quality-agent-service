@@ -5,9 +5,15 @@ from unittest.mock import AsyncMock
 import pytest
 
 from app.errors import ApplicationError, ErrorCode
-from app.repositories.protocols import RunRepository, SessionRepository
+from app.repositories.protocols import (
+    RunRepository,
+    SessionListQuery,
+    SessionPage,
+    SessionRepository,
+)
 from app.schemas.sessions import SessionProjectionResponse, SessionSummaryResponse
 from app.services.mapping import SESSION_SUMMARY_FIELDS, normalize_session_fields
+from app.services.session_listing import DEFAULT_PAGE_SIZE
 from app.services.session_service import SessionService
 
 
@@ -79,12 +85,25 @@ def test_collapse_uses_components_not_textual_prefixes():
         ["status,started_at"], ["metadata.name", "runs"], [None], "status",
     ],
 )
+def test_invalid_selection_is_rejected_by_normalization(fields):
+    with pytest.raises(ApplicationError) as caught:
+        normalize_session_fields(fields)
+    assert caught.value.code == ErrorCode.INVALID_FIELD
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        [""], ["runs"], ["metadata.$where"], ["status,started_at"],
+        ["metadata", "metadata.$where"], [None],
+    ],
+)
 def test_invalid_selection_is_rejected_before_any_repository_call(fields):
     sessions = AsyncMock(spec=SessionRepository)
     runs = AsyncMock(spec=RunRepository)
     service = SessionService(sessions, runs)
     with pytest.raises(ApplicationError) as caught:
-        asyncio.run(service.list_sessions(fields))
+        asyncio.run(service.list_sessions([("fields", field) for field in fields]))
     assert caught.value.code == ErrorCode.INVALID_FIELD
     assert str(caught.value) == "invalid_field"
     assert sessions.mock_calls == []
@@ -102,11 +121,17 @@ def test_invalid_selection_is_rejected_before_any_repository_call(fields):
 def test_service_passes_normalized_fields_through_the_protocol(fields, expected):
     sessions = AsyncMock(spec=SessionRepository)
     records = [{"session_id": "68df8b00aef4d8537282f001"}]
-    sessions.list_all.return_value = records
+    sessions.list_page.return_value = SessionPage(items=records, total_count=1)
     runs = AsyncMock(spec=RunRepository)
     service = SessionService(sessions, runs)
 
-    assert asyncio.run(service.list_sessions(fields)) is records
-    sessions.list_all.assert_awaited_once_with(expected)
+    parameters = None if fields is None else [("fields", field) for field in fields]
+    result = asyncio.run(service.list_sessions(parameters))
+    assert result.items is records
+    assert result.projected is (fields is not None)
+    sessions.list_page.assert_awaited_once_with(
+        SessionListQuery(fields=expected, page_size=DEFAULT_PAGE_SIZE)
+    )
     sessions.get.assert_not_awaited()
     assert runs.mock_calls == []
+

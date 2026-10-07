@@ -105,12 +105,25 @@ def valid_timestamp(value):
     return True
 
 
-def check_list(value, id_only=False):
-    label = "ID-only list" if id_only else "Selected list"
-    reason = "deploy the field-selection API; expected an array with only selected roots and valid session IDs."
-    require(isinstance(value, list), label, reason)
+PAGE_FIELDS = {"items", "page_size", "total_count", "next_cursor", "previous_cursor"}
+
+
+def check_list(value, id_only=False, label=None):
+    label = label or ("ID-only list" if id_only else "Selected list")
+    reason = "deploy the paginated field-selection API; expected a page envelope with only selected roots and valid session IDs."
+    require(isinstance(value, dict) and set(value) == PAGE_FIELDS, label, reason)
+    require(type(value["page_size"]) is int and 1 <= value["page_size"] <= 100, label, reason)
+    require(type(value["total_count"]) is int and value["total_count"] >= 0, label, reason)
+    for cursor in (value["next_cursor"], value["previous_cursor"]):
+        require(
+            cursor is None
+            or (isinstance(cursor, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,512}", cursor)),
+            label, reason,
+        )
+    rows = value["items"]
+    require(isinstance(rows, list) and len(rows) <= value["page_size"], label, reason)
     allowed = {"session_id"} if id_only else {"session_id", "started_at", "metadata"}
-    for row in value:
+    for row in rows:
         require(
             isinstance(row, dict)
             and set(row) <= allowed
@@ -119,6 +132,7 @@ def check_list(value, id_only=False):
             and ("metadata" not in row or isinstance(row["metadata"], dict)),
             label, reason,
         )
+    return rows
 
 
 def check_detail(value, session_id):
@@ -210,13 +224,19 @@ def run_checks(base_url):
             body = get(label, asset_path(reference, base_url, extension), media_types=media_types)
             require(body.strip(), label, "empty asset; rebuild and serve the complete React bundle.")
 
-    selected = get_json("Selected list", "/v1/sessions?fields=started_at&fields=metadata.invoked_by.name&fields=metadata.boundary")
-    check_list(selected)
-    ids = get_json("ID-only list", "/v1/sessions?fields=session_id")
-    check_list(ids, id_only=True)
+    invalid_field = {"error": {"code": "invalid_field", "message": "A request field is invalid."}}
+    selected = check_list(get_json("Selected list", "/v1/sessions?fields=started_at&fields=metadata.invoked_by.name&fields=metadata.boundary"))
+    ids = check_list(get_json("ID-only list", "/v1/sessions?fields=session_id"), id_only=True)
+    check_list(
+        get_json("Filtered list", "/v1/sessions?fields=session_id&status=COMPLETED&page_size=1"),
+        id_only=True, label="Filtered list",
+    )
     invalid = get_json("Invalid list selector", "/v1/sessions?fields=runs", 400)
-    require(invalid == {"error": {"code": "invalid_field", "message": "A request field is invalid."}},
+    require(invalid == invalid_field,
             "Invalid list selector", "expected the invalid_field error envelope; deploy the field-selection API.")
+    rejected = get_json("Invalid list parameter", "/v1/sessions?page_size=0", 400)
+    require(rejected == invalid_field,
+            "Invalid list parameter", "expected the invalid_field error envelope; deploy the paginated list API.")
 
     # Requests are independent reads: never compare counts, ordering, or mutable values.
     rows = selected or ids

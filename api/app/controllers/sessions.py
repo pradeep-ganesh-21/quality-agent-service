@@ -1,6 +1,6 @@
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, Query, Request, status
+from fastapi import APIRouter, Depends, Request, status
 from pydantic import ValidationError
 
 from app.dependencies import get_session_service
@@ -9,6 +9,7 @@ from app.repositories.protocols import SessionRecord
 from app.schemas.sessions import (
     SessionDetailResponse,
     SessionIdResponse,
+    SessionListResponse,
     SessionProjectionResponse,
     SessionSummaryResponse,
 )
@@ -20,21 +21,30 @@ router = APIRouter(prefix="/v1/sessions", tags=["sessions"])
 
 @router.get(
     "",
-    response_model=list[SessionSummaryResponse | SessionProjectionResponse],
+    response_model=SessionListResponse,
     response_model_exclude_unset=True,
 )
 async def list_sessions(
+    request: Request,
     service: Annotated[SessionService, Depends(get_session_service)],
-    fields: Annotated[list[str] | None, Query()] = None,
-) -> list[SessionSummaryResponse | SessionProjectionResponse]:
-    records = await service.list_sessions(fields)
+) -> SessionListResponse:
+    # Query parameters are validated in the service, including repeated and
+    # unknown names, so they are passed through unparsed.
+    result = await service.list_sessions(request.query_params.multi_items())
     # An incomplete default summary must not pass via the optional-fields model.
-    response_model = SessionSummaryResponse if fields is None else SessionProjectionResponse
+    item_model = SessionProjectionResponse if result.projected else SessionSummaryResponse
     try:
-        return [response_model.model_validate(record) for record in records]
+        items = [item_model.model_validate(record) for record in result.items]
     except ValidationError:
         # Do not let stored values or arbitrary keys reach the server error log.
         raise ApplicationError(ErrorCode.INTERNAL_ERROR) from None
+    return SessionListResponse(
+        items=items,
+        page_size=result.page_size,
+        total_count=result.total_count,
+        next_cursor=result.next_cursor,
+        previous_cursor=result.previous_cursor,
+    )
 
 
 @router.get("/{session_id}", response_model=SessionDetailResponse)

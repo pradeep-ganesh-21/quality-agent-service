@@ -14,10 +14,14 @@ from app.services.mapping import (
     SESSION_CREATE_RESERVED_FIELDS,
     SESSION_PATCH_CONSUMED_FIELDS,
     SESSION_PATCH_RESERVED_FIELDS,
-    normalize_session_fields,
     utc_milliseconds,
     validate_document_depth,
     validate_json_values,
+)
+from app.services.session_listing import (
+    SessionListResult,
+    build_session_list_result,
+    parse_session_list_request,
 )
 
 
@@ -26,8 +30,12 @@ class SessionService:
         self._repository = repository
         self._runs = runs
 
-    async def list_sessions(self, fields: Sequence[str] | None = None) -> list[SessionRecord]:
-        return await self._repository.list_all(normalize_session_fields(fields))
+    async def list_sessions(
+        self, parameters: Sequence[tuple[str, str]] | None = None
+    ) -> SessionListResult:
+        request = parse_session_list_request(parameters)
+        page = await self._repository.list_page(request.query)
+        return build_session_list_result(request, page)
 
     async def get_session(self, session_id: str) -> SessionRecord:
         session = await self._repository.get(session_id)

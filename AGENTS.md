@@ -34,11 +34,16 @@ Do not edit the legacy sample, schema draft, requirements prose, or architecture
 - Catch `DocumentTooLarge` before `InvalidDocument`.
 - Map JSON parse `RecursionError` to `400`.
 - Override FastAPI request validation to `400`. Preserve Starlette HTTP exception status and the `Allow` header on `405`.
-- Keep reads unbounded and use two detail queries. Do not add pagination, hidden limits, `$lookup`, or snapshot claims.
+- Keep detail reads unbounded and use two detail queries. Do not add `$lookup`, hidden limits, or snapshot claims to any read.
+- Return every session list as the five-field page envelope in DESIGN.md. Keep paging cursor-based with next and previous only, and never add offsets, page numbers, or a client-selectable sort.
+- Support only the named list filters in DESIGN.md. Filter no metadata path other than `metadata.boundary` and `metadata.invoked_by.email`, escape literal filter text, and require a genuine non-array scalar at every filtered metadata path.
+- Validate every list query parameter in the service before any repository call. Reject unknown and repeated parameters with `invalid_field` instead of ignoring them, and never echo a supplied value.
+- Treat cursors as unsigned continuation values, not credentials. Bind them to the filters and page size, validate them before any database operation, and return an empty terminal page for a stale one.
+- Always project the list sort key to mint cursors, and strip it from records that did not select it.
 - Allow run insertion after a parent becomes terminal. Only session patch is status-guarded.
-- Browser code calls only relative `/v1/sessions` (optionally with repeated `fields` query parameters) and `/v1/sessions/{session_id}` paths through NGINX. It never uses the Docker hostname `api`, its internal port, `API_BASE_URL`, or `/ui/api/*`.
+- Browser code calls only relative `/v1/sessions` (optionally with repeated `fields` parameters and the DESIGN.md filter and paging parameters) and `/v1/sessions/{session_id}` paths through NGINX. It never uses the Docker hostname `api`, its internal port, `API_BASE_URL`, or `/ui/api/*`.
 - The Python webserver serves built React assets and internal liveness only. It has no API or MongoDB client, BFF data routes, server rendering, retries, caching, authentication, or aggregation.
-- Keep default list responses to the eight root fields in DESIGN.md, excluding metadata and runs. Explicit `fields` selection may include metadata paths; always return `session_id`, never runs, and do not fill omitted values. Validate selectors in services and build inclusion projections only in the repository adapter. Keep the full detail projection independent of selected list fields.
+- Keep default list items to the eight root fields in DESIGN.md, excluding metadata and runs. Explicit `fields` selection may include metadata paths; always return `session_id`, never runs, and do not fill omitted values. Validate selectors in services and build inclusion projections only in the repository adapter. Keep the full detail projection independent of selected list fields.
 - Serve the SPA only for `/` and `/sessions/{session_id}`. Unknown routes and missing assets return `404`.
 - NGINX is the only host-published service at `0.0.0.0:8080:80`. Keep HTTP only.
 - Set `client_max_body_size 0`. Do not add an application request size cap.

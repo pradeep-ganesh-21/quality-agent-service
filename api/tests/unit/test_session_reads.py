@@ -1,60 +1,74 @@
 import pytest
 
 from app.errors import ApplicationError, ErrorCode
+from app.repositories.protocols import SessionFilters, SessionListQuery
 from app.services.mapping import SESSION_SUMMARY_FIELDS
 from conftest import (
+    DEFAULT_PAGE_SIZE,
     INTERNAL_ERROR,
     INVALID_FIELD,
     RUN_ID,
     SERIALIZED_TIMESTAMP,
     SESSION_ID,
     TIMESTAMP,
+    page_response,
+    session_page,
     summary_record,
 )
 
 
+def default_query(**overrides) -> SessionListQuery:
+    settings = {
+        "fields": SESSION_SUMMARY_FIELDS,
+        "page_size": DEFAULT_PAGE_SIZE,
+        "filters": SessionFilters(),
+        "position": None,
+    }
+    return SessionListQuery(**{**settings, **overrides})
+
+
 def test_default_list_retains_exact_eight_field_response(api_client):
     client, sessions, runs = api_client
-    sessions.list_all.return_value = [summary_record()]
+    sessions.list_page.return_value = session_page(summary_record())
     response = client.get("/v1/sessions")
     assert response.status_code == 200
-    assert response.json() == [{
+    assert response.json() == page_response([{
         **summary_record(),
         "started_at": SERIALIZED_TIMESTAMP,
         "received_at": SERIALIZED_TIMESTAMP,
-    }]
-    assert set(response.json()[0]) == set(SESSION_SUMMARY_FIELDS)
-    sessions.list_all.assert_awaited_once_with(SESSION_SUMMARY_FIELDS)
+    }])
+    assert set(response.json()["items"][0]) == set(SESSION_SUMMARY_FIELDS)
+    sessions.list_page.assert_awaited_once_with(default_query())
     assert runs.mock_calls == []
 
 
 def test_repeated_fields_produce_nested_partial_response(api_client):
     client, sessions, runs = api_client
-    sessions.list_all.return_value = [{
+    sessions.list_page.return_value = session_page({
         "session_id": SESSION_ID,
         "started_at": TIMESTAMP,
         "metadata": {"invoked_by": {"name": "Operator"}, "boundary": "checkout"},
-    }]
+    })
     response = client.get("/v1/sessions", params=[
         ("fields", "started_at"),
         ("fields", "metadata.invoked_by.name"),
         ("fields", "metadata.boundary"),
     ])
     assert response.status_code == 200
-    assert response.json() == [{
+    assert response.json() == page_response([{
         "session_id": SESSION_ID,
         "started_at": SERIALIZED_TIMESTAMP,
         "metadata": {"invoked_by": {"name": "Operator"}, "boundary": "checkout"},
-    }]
-    sessions.list_all.assert_awaited_once_with((
+    }])
+    sessions.list_page.assert_awaited_once_with(default_query(fields=(
         "metadata.boundary", "metadata.invoked_by.name", "session_id", "started_at",
-    ))
+    )))
     assert runs.mock_calls == []
 
 
 def test_explicit_default_fields_match_the_unqualified_response(api_client):
     client, sessions, _ = api_client
-    sessions.list_all.return_value = [summary_record()]
+    sessions.list_page.return_value = session_page(summary_record())
     default = client.get("/v1/sessions")
     selected = client.get("/v1/sessions", params=[("fields", field) for field in SESSION_SUMMARY_FIELDS])
     assert default.status_code == selected.status_code == 200
@@ -62,21 +76,26 @@ def test_explicit_default_fields_match_the_unqualified_response(api_client):
 
 
 @pytest.mark.parametrize("selector", [None, "session_id", "metadata.boundary"])
-def test_empty_list_is_always_an_empty_array(api_client, selector):
+def test_empty_result_keeps_the_envelope_without_cursors(api_client, selector):
     client, _, _ = api_client
     response = client.get("/v1/sessions", params={} if selector is None else {"fields": selector})
     assert response.status_code == 200
-    assert response.json() == []
+    assert response.json() == page_response([], total_count=0)
 
 
-def test_id_only_list_is_unbounded_and_retains_repository_order(api_client):
+def test_page_is_bounded_and_reports_the_total_match_count(api_client):
     client, sessions, _ = api_client
-    records = [{"session_id": f"{index:024x}"} for index in range(1100, 0, -1)]
-    sessions.list_all.return_value = records
+    records = [{"session_id": f"{index:024x}"} for index in range(1100, 1075, -1)]
+    sessions.list_page.return_value = session_page(*records, total_count=1100, has_older=True)
     response = client.get("/v1/sessions?fields=session_id")
     assert response.status_code == 200
-    assert response.json() == records
-    sessions.list_all.assert_awaited_once_with(("session_id",))
+    body = response.json()
+    assert body["items"] == records
+    assert body["page_size"] == DEFAULT_PAGE_SIZE
+    assert body["total_count"] == 1100
+    assert body["previous_cursor"] is None
+    assert isinstance(body["next_cursor"], str)
+    sessions.list_page.assert_awaited_once_with(default_query(fields=("session_id",)))
 
 
 def test_explicit_null_and_absent_values_are_distinct(api_client):
@@ -88,13 +107,13 @@ def test_explicit_null_and_absent_values_are_distinct(api_client):
         {"session_id": SESSION_ID, "metadata": {"boundary": None}},
         {"session_id": SESSION_ID, "execution_outcome": {"defect_count": 0}},
     ]
-    sessions.list_all.return_value = records
+    sessions.list_page.return_value = session_page(*records)
     response = client.get("/v1/sessions", params=[
         ("fields", "completion_time"), ("fields", "execution_outcome"),
         ("fields", "metadata.boundary"),
     ])
     assert response.status_code == 200
-    assert response.json() == records
+    assert response.json()["items"] == records
 
 
 @pytest.mark.parametrize("field", ["started_at", "received_at", "completion_time"])
@@ -102,12 +121,13 @@ def test_explicit_null_and_absent_values_are_distinct(api_client):
 def test_each_projected_timestamp_uses_exact_utc_milliseconds(api_client, field, microsecond):
     client, sessions, _ = api_client
     timestamp = TIMESTAMP.replace(microsecond=microsecond)
-    sessions.list_all.return_value = [{"session_id": SESSION_ID, field: timestamp}]
+    record = {"session_id": SESSION_ID, field: timestamp}
+    sessions.list_page.return_value = session_page(record)
     response = client.get("/v1/sessions", params={"fields": field})
     assert response.status_code == 200
     expected = "2026-10-01T09:07:04.000Z" if microsecond == 0 else SERIALIZED_TIMESTAMP
-    assert response.json() == [{"session_id": SESSION_ID, field: expected}]
-    assert sessions.list_all.return_value[0][field] == timestamp
+    assert response.json()["items"] == [{"session_id": SESSION_ID, field: expected}]
+    assert record[field] == timestamp
 
 
 def test_complete_parent_selection_preserves_unknown_json(api_client):
@@ -121,13 +141,13 @@ def test_complete_parent_selection_preserves_unknown_json(api_client):
         "__proto__": {"name": "data"},
         "timestamp_text": "2026-10-01T11:00:00+02:00",
     }
-    sessions.list_all.return_value = [{"session_id": SESSION_ID, "metadata": metadata}]
+    sessions.list_page.return_value = session_page({"session_id": SESSION_ID, "metadata": metadata})
     response = client.get("/v1/sessions", params=[
         ("fields", "metadata.boundary.a"), ("fields", "metadata"), ("fields", "metadata"),
     ])
     assert response.status_code == 200
-    assert response.json() == [{"session_id": SESSION_ID, "metadata": metadata}]
-    sessions.list_all.assert_awaited_once_with(("metadata", "session_id"))
+    assert response.json()["items"] == [{"session_id": SESSION_ID, "metadata": metadata}]
+    sessions.list_page.assert_awaited_once_with(default_query(fields=("metadata", "session_id")))
 
 
 @pytest.mark.parametrize(
@@ -150,7 +170,7 @@ def test_default_list_still_rejects_incomplete_records(api_client, field):
     client, sessions, _ = api_client
     record = summary_record()
     del record[field]
-    sessions.list_all.return_value = [record]
+    sessions.list_page.return_value = session_page(record)
     response = client.get("/v1/sessions")
     assert response.status_code == 500
     assert response.json() == INTERNAL_ERROR
@@ -169,7 +189,7 @@ def test_default_list_still_rejects_incomplete_records(api_client, field):
 )
 def test_projected_response_keeps_present_fields_strict(api_client, record):
     client, sessions, _ = api_client
-    sessions.list_all.return_value = [record]
+    sessions.list_page.return_value = session_page(record)
     response = client.get("/v1/sessions?fields=session_id")
     assert response.status_code == 500
     assert response.json() == INTERNAL_ERROR
@@ -180,7 +200,7 @@ def test_projected_response_keeps_present_fields_strict(api_client, record):
 )
 def test_selected_nonnullable_fields_reject_explicit_null(api_client, field):
     client, sessions, _ = api_client
-    sessions.list_all.return_value = [{"session_id": SESSION_ID, field: None}]
+    sessions.list_page.return_value = session_page({"session_id": SESSION_ID, field: None})
     response = client.get("/v1/sessions", params={"fields": field})
     assert response.status_code == 500
     assert response.json() == INTERNAL_ERROR
@@ -188,7 +208,7 @@ def test_selected_nonnullable_fields_reject_explicit_null(api_client, field):
 
 def test_default_list_rejects_accidental_metadata_instead_of_exposing_it(api_client):
     client, sessions, _ = api_client
-    sessions.list_all.return_value = [{**summary_record(), "metadata": {"private": "value"}}]
+    sessions.list_page.return_value = session_page({**summary_record(), "metadata": {"private": "value"}})
     response = client.get("/v1/sessions")
     assert response.status_code == 500
     assert response.json() == INTERNAL_ERROR
@@ -196,8 +216,10 @@ def test_default_list_rejects_accidental_metadata_instead_of_exposing_it(api_cli
 
 def test_detail_remains_complete_after_selected_list_read(api_client):
     client, sessions, runs = api_client
-    sessions.list_all.return_value = [{"session_id": SESSION_ID}]
-    assert client.get("/v1/sessions?fields=session_id").json() == [{"session_id": SESSION_ID}]
+    sessions.list_page.return_value = session_page({"session_id": SESSION_ID})
+    assert client.get("/v1/sessions?fields=session_id").json()["items"] == [
+        {"session_id": SESSION_ID}
+    ]
 
     metadata = {"invoked_by": {"name": "Operator", "email": "operator@example.invalid"}}
     sessions.get.return_value = {**summary_record(), "metadata": metadata}
@@ -246,7 +268,7 @@ def test_incomplete_detail_still_fails_response_validation(api_client):
 
 def test_list_database_error_retains_sanitized_application_envelope(api_client):
     client, sessions, _ = api_client
-    sessions.list_all.side_effect = ApplicationError(ErrorCode.INTERNAL_ERROR)
+    sessions.list_page.side_effect = ApplicationError(ErrorCode.INTERNAL_ERROR)
     response = client.get("/v1/sessions?fields=metadata")
     assert response.status_code == 500
     assert response.json() == INTERNAL_ERROR

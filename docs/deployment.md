@@ -2,7 +2,7 @@
 
 Open **http://localhost:8080/** after deployment and verification. NGINX is the only host-published service. It serves public requests through the Python webserver for UI files and through the API for `/v1/*` data.
 
-This POC is HTTP-only and unauthenticated. Anyone who can reach port 8080 can read and write API data. Requests and reads are unbounded, and explicit full-metadata selection can use substantial memory and bandwidth. This is not a production deployment.
+This POC is HTTP-only and unauthenticated. Anyone who can reach port 8080 can read and write API data. Request bodies and session detail reads are unbounded, and explicit full-metadata selection can use substantial memory and bandwidth. Session list reads are bounded to one page of at most 100 records, but any caller can still walk every page and can request substring filters that the server evaluates without a supporting index. This is not a production deployment.
 
 ## Prerequisites
 

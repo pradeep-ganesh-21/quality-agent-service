@@ -111,3 +111,15 @@ class SessionProjectionResponse(SessionIdResponse):
     @field_serializer("started_at", "received_at", "completion_time", when_used="json")
     def serialize_timestamp(self, value: datetime | None) -> str | None:
         return None if value is None else format_timestamp(value)
+
+
+class SessionListResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    items: list[SessionSummaryResponse | SessionProjectionResponse]
+    page_size: int = Field(ge=1)
+    # Counts every filter match, independent of the returned page.
+    total_count: int = Field(ge=0)
+    # Null means no further page in that direction at read time.
+    next_cursor: str | None
+    previous_cursor: str | None
