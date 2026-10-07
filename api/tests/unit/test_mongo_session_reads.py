@@ -33,7 +33,7 @@ def repository():
     collection.find.return_value = cursor  # find() is deliberately synchronous.
     collection.find_one = AsyncMock(return_value=None)
     database = MagicMock()
-    database.get_collection.return_value = collection
+    database.__getitem__.return_value = collection
     return MongoSessionRepository(database), collection, cursor
 
 
@@ -127,7 +127,19 @@ def test_detail_still_maps_the_complete_record(repository):
     assert document == snapshot
 
 
-def test_malformed_detail_id_does_not_query_mongodb(repository):
+@pytest.mark.parametrize(
+    "session_id",
+    [
+        "not-an-id", "", "68df8b00aef4d8537282f0", SESSION_ID + "00",
+        # ObjectId(None) would generate a new identifier instead of failing.
+        None,
+        1, 1.5, True, [], {},
+        # ObjectId accepts these, but the repository contract is a string identifier.
+        ObjectId(SESSION_ID), bytes.fromhex(SESSION_ID),
+    ],
+)
+def test_invalid_detail_identifiers_do_not_query_mongodb(repository, session_id):
     repo, collection, _ = repository
-    assert asyncio.run(repo.get("not-an-id")) is None
+    assert asyncio.run(repo.get(session_id)) is None
     collection.find_one.assert_not_awaited()
+    collection.find.assert_not_called()

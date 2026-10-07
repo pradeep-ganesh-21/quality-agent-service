@@ -28,14 +28,21 @@ async def mongo_runtime(uri: str, database_name: str) -> AsyncIterator[MongoRepo
         socketTimeoutMS=30000,
     )
     try:
+        database = client[database_name]
+        # Writes must be acknowledged. An unacknowledged write concern cannot
+        # report insertion identifiers or the guarded patch match.
+        if not database.write_concern.acknowledged:
+            raise RuntimeError(
+                "MongoDB write concern must be acknowledged; "
+                "unacknowledged writes cannot confirm session changes."
+            )
         try:
             await client.admin.command("ping")
-            await ensure_indexes(client[database_name])
+            await ensure_indexes(database)
         except PyMongoError:
             raise RuntimeError(
                 "MongoDB startup failed; check availability, credentials, and indexes."
             ) from None
-        database = client[database_name]
         yield MongoRepositories(
             sessions=MongoSessionRepository(database),
             runs=MongoRunRepository(database),

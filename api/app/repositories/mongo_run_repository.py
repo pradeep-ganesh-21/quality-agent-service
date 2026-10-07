@@ -1,9 +1,8 @@
-from bson import ObjectId
-from bson.errors import InvalidId
 from pymongo.asynchronous.database import AsyncDatabase
 
 from app.errors import ApplicationError, ErrorCode
 from app.repositories.mongo_read_errors import translate_read_errors
+from app.repositories.object_ids import parse_object_id
 from app.repositories.protocols import RunRecord
 
 _RUN_PROJECTION = {
@@ -24,10 +23,9 @@ class MongoRunRepository:
         self._collection = database["runs"]
 
     async def list_for_session(self, session_id: str) -> list[RunRecord]:
-        try:
-            object_id = ObjectId(session_id)
-        except (InvalidId, TypeError):
-            raise ApplicationError(ErrorCode.SESSION_NOT_FOUND) from None
+        object_id = parse_object_id(session_id)
+        if object_id is None:
+            raise ApplicationError(ErrorCode.SESSION_NOT_FOUND)
         with translate_read_errors():
             async with self._collection.find(
                 {"session_id": object_id}, _RUN_PROJECTION

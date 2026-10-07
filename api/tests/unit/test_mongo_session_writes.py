@@ -13,7 +13,6 @@ import pytest
 from bson import ObjectId
 from bson.errors import InvalidDocument
 from pymongo.errors import ConnectionFailure, DocumentTooLarge, OperationFailure, WriteError
-from pymongo.write_concern import WriteConcern
 
 from app.errors import ApplicationError, ErrorCode
 from app.repositories.mongo_session_repository import MongoSessionRepository
@@ -42,7 +41,7 @@ def repository():
     )
     collection.find_one = AsyncMock(return_value=None)
     database = MagicMock()
-    database.get_collection.return_value = collection
+    database.__getitem__.return_value = collection
     return MongoSessionRepository(database), collection, database
 
 
@@ -53,11 +52,12 @@ def expect_error(code, call):
     return caught.value
 
 
-def test_writes_use_the_sessions_collection_with_acknowledged_write_concern(repository):
+def test_writes_use_the_sessions_collection_without_overriding_write_concern(repository):
     _, _, database = repository
-    name, options = database.get_collection.call_args.args, database.get_collection.call_args.kwargs
-    assert name == ("sessions",)
-    assert options == {"write_concern": WriteConcern(w=1)}
+    database.__getitem__.assert_called_once_with("sessions")
+    # Overriding the write concern here would discard the configured durability.
+    assert database.get_collection.mock_calls == []
+    assert database.with_options.mock_calls == []
 
 
 def test_create_inserts_one_document_and_returns_the_generated_identifier(repository):
@@ -207,10 +207,12 @@ def test_unmatched_update_on_an_existing_session_reports_a_terminal_conflict(rep
     "session_id",
     [
         "", "not-an-object-id", "68df8b00aef4d8537282f0", SESSION_ID + "00",
-        SESSION_ID + " ", " " + SESSION_ID, "68df8b00aef4d8537282f00g", 1, 1.5, True, [], {},
+        SESSION_ID + " ", " " + SESSION_ID, "68df8b00aef4d8537282f00g",
     ],
 )
-def test_malformed_identifiers_report_not_found_without_touching_mongodb(repository, session_id):
+def test_malformed_identifier_strings_report_not_found_without_touching_mongodb(
+    repository, session_id
+):
     repo, collection, _ = repository
     expect_error(
         ErrorCode.SESSION_NOT_FOUND,
@@ -220,9 +222,37 @@ def test_malformed_identifiers_report_not_found_without_touching_mongodb(reposit
     collection.find_one.assert_not_awaited()
 
 
-def test_uppercase_identifiers_are_normalized_in_the_filter_and_response(repository):
+@pytest.mark.parametrize(
+    "session_id",
+    [
+        # ObjectId(None) would generate a new identifier instead of failing, which
+        # would silently target an unrelated document.
+        None,
+        1, 1.5, True, [], {}, (), set(),
+        # ObjectId accepts these, but the repository contract is a string identifier.
+        ObjectId(SESSION_ID),
+        bytes.fromhex(SESSION_ID),
+        bytearray.fromhex(SESSION_ID),
+    ],
+)
+def test_non_string_identifiers_report_not_found_without_touching_mongodb(
+    repository, session_id
+):
     repo, collection, _ = repository
-    assert asyncio.run(repo.patch_open_session(SESSION_ID.upper(), {}, {})) == SESSION_ID
+    expect_error(
+        ErrorCode.SESSION_NOT_FOUND,
+        lambda: asyncio.run(repo.patch_open_session(session_id, {}, {})),
+    )
+    collection.update_one.assert_not_awaited()
+    collection.find_one.assert_not_awaited()
+
+
+@pytest.mark.parametrize("session_id", [SESSION_ID, SESSION_ID.upper()])
+def test_valid_identifier_strings_are_normalized_in_the_filter_and_response(
+    repository, session_id
+):
+    repo, collection, _ = repository
+    assert asyncio.run(repo.patch_open_session(session_id, {}, {})) == SESSION_ID
     assert collection.update_one.await_args.args[0]["_id"] == ObjectId(SESSION_ID)
 
 

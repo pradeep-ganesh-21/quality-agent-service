@@ -44,8 +44,10 @@ api/
       __init__.py
       protocols.py
       mongo_runtime.py
+      mongo_read_errors.py
       mongo_session_repository.py
       mongo_run_repository.py
+      object_ids.py
       indexes.py
     schemas/
       __init__.py
@@ -199,6 +201,8 @@ Controllers own HTTP routing and translate validated inputs into service calls. 
 
 `ObjectId`, `bson`, MongoDB clients, cursors, filters, update operators, and pipeline syntax must stay in repository adapter files. `indexes.py` may contain MongoDB index definitions. Repository protocols may use primitive ID strings, dictionaries used as DTOs, and timezone-aware `datetime` values. They must not expose MongoDB clients, filters, cursors, or BSON IDs.
 
+Repository identifier arguments are strings. An adapter must confirm that an identifier is a string before converting it, because `ObjectId(None)` generates a new identifier instead of failing and would silently target an unrelated document. `ObjectId` also accepts 12-byte values and existing `ObjectId` instances, which the string identifier contract does not allow. Keep this one conversion helper in `repositories/object_ids.py` and use it for every identifier the adapters parse. Treat any non-string value, including `None`, exactly like a malformed identifier string: session reads return no record, and session patch and run listing raise `session_not_found`. Reject the value before issuing any MongoDB operation.
+
 The protocols are real test seams. They let service tests use small fakes without importing MongoDB. Keep each protocol limited to operations the service currently needs. Do not introduce generic repositories. Define these exact operations in `protocols.py`:
 
 ```python
@@ -258,16 +262,18 @@ AsyncMongoClient(
 
 The adapter factory returns initialized session and run repository objects plus an async close operation. `main.py` calls this factory from lifespan. This keeps `AsyncMongoClient`, the database handle, BSON, and index calls inside repository adapter files.
 
+Write concern is deployment configuration, not application code. Collections inherit the client and database write concern that `MONGO_URI` and the server supply. Do not hardcode a write concern on a collection, because that silently discards a configured durability or journaling setting. Writes must be acknowledged: the create path returns a server-generated identifier and the patch path decides `404`, `409`, and success from `matched_count`, neither of which an unacknowledged write reports. Startup must therefore reject an unacknowledged write concern, such as `w=0`, before the ping and index step, close the client, and fail with a nonzero process exit. Keep that startup message fixed and free of URI or credential text. Do not add a write-concern environment variable.
+
 `dependencies.py` contains plain FastAPI providers. Lifespan stores the initialized repository objects on `app.state`. Providers read those repositories and construct lightweight services. They do not expose a database handle to services and do not create a client per request.
 
 `main.py` exposes an application factory and a lifespan context. Lifespan must:
 
 1. Call the repository adapter factory once for the event loop. Never create resources at import time.
-2. Let that factory ping MongoDB and create the exact indexes in section 10.
+2. Let that factory reject an unacknowledged write concern, ping MongoDB, and create the exact indexes in section 10.
 3. Store initialized repository objects on `app.state`.
 4. Await the adapter close operation during shutdown.
 
-Startup must fail with a nonzero process exit if ping or index creation fails. Do not use developer reload in containers. Run one Uvicorn worker by default. A compose startup gate does not guarantee later availability.
+Startup must fail with a nonzero process exit if the write concern is unacknowledged or if ping or index creation fails. Do not use developer reload in containers. Run one Uvicorn worker by default. A compose startup gate does not guarantee later availability.
 
 PyMongo async `find()` returns an async cursor synchronously. Do not await `find()`. Await network operations such as `insert_one`, `update_one`, `find_one`, cursor `to_list`, database `command`, and client close according to the pinned driver API. Do not share an async client across event loops or threads.
 
@@ -579,7 +585,7 @@ async def patch_open_session(session_id: str, known: dict, extras: dict) -> str:
     raise SessionNotOpen()
 ```
 
-This snippet belongs in a repository adapter, where `ObjectId` is allowed. The implementation must validate malformed IDs before entering this function or map them to `SessionNotFound` in the adapter.
+This snippet belongs in a repository adapter, where `ObjectId` is allowed. The implementation must validate malformed IDs before entering this function or map them to `SessionNotFound` in the adapter. The real adapter also rejects a non-string identifier through the shared helper in section 4 before constructing the filter, so `ObjectId(None)` can never generate an identifier here.
 
 `matched_count`, not `modified_count`, determines success. An identical update still matched the guarded document. A zero match requires one ID-only lookup to distinguish `404` from `409`.
 
@@ -1087,6 +1093,9 @@ Cover at least these cases:
 - Two concurrent terminal patches produce one `200` and one `409`.
 - Any valid patch, including `{}`, returns `409` once the session is terminal.
 - Malformed session IDs return `404`.
+- Non-string repository identifiers, including `None`, 12-byte values, and `ObjectId` instances, are treated as malformed and issue no MongoDB operation.
+- Collections inherit the configured write concern; no adapter overrides it.
+- Startup rejects an unacknowledged write concern before the ping and index step and still closes the client.
 - A real oversize insert returns `413`.
 - Cumulative metadata growth by patch returns `413` and leaves the prior document unchanged.
 - Non-finite numbers, huge integers, NUL keys, parse recursion, and final depth over 100 return `400` with the intended code.
@@ -1107,6 +1116,7 @@ The MongoDB integration suite pins these behaviors against the chosen image and 
 - cumulative patch oversize maps to `413` with no partial change
 - empty patch returns `200` based on `matched_count`
 - server-side oversize codes used by the pinned MongoDB version map correctly
+- the deployed write concern is acknowledged, so inserted identifiers and `matched_count` are reported
 
 ### Static webserver tests
 

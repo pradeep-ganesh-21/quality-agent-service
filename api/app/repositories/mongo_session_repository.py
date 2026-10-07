@@ -3,15 +3,14 @@ from contextlib import contextmanager
 from copy import deepcopy
 from typing import Any
 
-from bson import ObjectId
-from bson.errors import InvalidDocument, InvalidId
+from bson.errors import InvalidDocument
 from pymongo.asynchronous.database import AsyncDatabase
 from pymongo.errors import DocumentTooLarge, OperationFailure, PyMongoError
-from pymongo.write_concern import WriteConcern
 
 from app.domain import SessionStatus
 from app.errors import ApplicationError, ErrorCode
 from app.repositories.mongo_read_errors import translate_read_errors
+from app.repositories.object_ids import parse_object_id
 from app.repositories.protocols import SessionRecord
 
 _SESSION_DETAIL_PROJECTION = {
@@ -51,9 +50,9 @@ def _translate_mongo_errors() -> Iterator[None]:
 
 class MongoSessionRepository:
     def __init__(self, database: AsyncDatabase) -> None:
-        self._collection = database.get_collection(
-            "sessions", write_concern=WriteConcern(w=1)
-        )
+        # The collection inherits the configured write concern. Startup rejects
+        # an unacknowledged setting, which patch cannot report through matched_count.
+        self._collection = database["sessions"]
 
     async def create(self, values: Mapping[str, Any]) -> str:
         document = deepcopy(dict(values))
@@ -62,9 +61,8 @@ class MongoSessionRepository:
         return str(result.inserted_id)
 
     async def get(self, session_id: str) -> SessionRecord | None:
-        try:
-            object_id = ObjectId(session_id)
-        except (InvalidId, TypeError):
+        object_id = parse_object_id(session_id)
+        if object_id is None:
             return None
         with translate_read_errors():
             document = await self._collection.find_one(
@@ -88,10 +86,9 @@ class MongoSessionRepository:
         known: Mapping[str, Any],
         extras: Mapping[str, Any],
     ) -> str:
-        try:
-            object_id = ObjectId(session_id)
-        except (InvalidId, TypeError):
-            raise ApplicationError(ErrorCode.SESSION_NOT_FOUND) from None
+        object_id = parse_object_id(session_id)
+        if object_id is None:
+            raise ApplicationError(ErrorCode.SESSION_NOT_FOUND)
 
         set_spec = {
             key: {"$literal": deepcopy(value)} for key, value in known.items()
