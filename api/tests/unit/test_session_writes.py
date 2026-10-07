@@ -57,7 +57,6 @@ def test_create_returns_only_the_server_generated_identifier(api_client):
         {"status": "FAILED", "completion_time": None},
         {"last_step_executed": ["pair-actions"], "invoked_by": {"name": "Operator"}},
         {"execution_outcome": {"defect_count": 0, "unknown": {"nested": True}}},
-        {"started_at": STARTED_AT},
     ],
 )
 def test_patch_accepts_open_partial_updates_including_an_empty_object(api_client, body):
@@ -152,6 +151,54 @@ def test_patch_rejects_every_reserved_top_level_field(api_client, field):
     assert sessions.mock_calls == []
 
 
+@pytest.mark.parametrize(
+    "value",
+    [
+        STARTED_AT, "2026-10-02T09:07:04Z", "not-a-timestamp",
+        "2026-10-01T09:07:04", None, 1790000000, True, [], {},
+    ],
+)
+def test_patch_rejects_started_at_with_the_reserved_field_error(api_client, value):
+    client, sessions, runs = api_client
+    response = patch(client, {
+        "started_at": value,
+        "status": "COMPLETED",
+        "boundary": "must-not-be-written",
+    })
+    assert response.status_code == 400
+    assert response.json() == FORBIDDEN_FIELD
+    assert sessions.mock_calls == []
+    assert runs.mock_calls == []
+
+
+@pytest.mark.parametrize(
+    ("path", "failure"),
+    [
+        (PATCH_PATH, ErrorCode.SESSION_NOT_OPEN),
+        (PATCH_PATH, ErrorCode.SESSION_NOT_FOUND),
+        ("/v1/sessions/not-an-object-id", ErrorCode.SESSION_NOT_FOUND),
+    ],
+)
+def test_patch_rejects_started_at_without_checking_session_state(api_client, path, failure):
+    client, sessions, runs = api_client
+    sessions.patch_open_session.side_effect = ApplicationError(failure)
+    response = patch(client, {"started_at": STARTED_AT}, path=path)
+    assert response.status_code == 400
+    assert response.json() == FORBIDDEN_FIELD
+    assert sessions.mock_calls == []
+    assert runs.mock_calls == []
+
+
+def test_patch_allows_nested_started_at_without_assigning_the_root(api_client):
+    client, sessions, runs = api_client
+    body = {"metadata": {"started_at": "not-a-timestamp"}, "trace": [{"started_at": None}]}
+    response = patch(client, body)
+    assert response.status_code == 200
+    assert response.json() == {"session_id": SESSION_ID}
+    sessions.patch_open_session.assert_awaited_once_with(SESSION_ID, {}, body)
+    assert runs.mock_calls == []
+
+
 def test_patch_allows_the_session_root_fields_that_creation_reserves(api_client):
     client, sessions, _ = api_client
     response = patch(client, {
@@ -190,7 +237,7 @@ def test_create_requires_a_valid_offset_aware_started_at(api_client, body, expec
     [
         {"status": None}, {"status": "IN_PROGRESS"}, {"status": "completed"}, {"status": 1},
         {"last_step_executed": None}, {"last_step_executed": "pair-actions"},
-        {"last_step_executed": ["ok", 1]}, {"started_at": None},
+        {"last_step_executed": ["ok", 1]},
         {"completion_time": "2026-10-01T09:18:04"},
         {"execution_outcome": []}, {"execution_outcome": {"defect_count": -1}},
         {"execution_outcome": {"defect_count": "2"}},

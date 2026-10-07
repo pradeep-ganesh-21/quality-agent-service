@@ -465,7 +465,7 @@ last_step_executed
 execution_outcome
 ```
 
-Require `started_at` as an aware RFC 3339 string. All other top-level fields are extras under `metadata`.
+Require `started_at` as an aware RFC 3339 string. The root session `started_at` is set only during session creation. All other top-level fields are extras under `metadata`.
 
 Initialize server-owned root fields exactly as follows:
 
@@ -559,15 +559,19 @@ Reject these top-level fields with `400 forbidden_field` before Pydantic:
 ```text
 _id
 session_id
+started_at
 received_at
 schema_version
 ```
+
+`started_at` is creation-only. Reject every patch that contains it at the top level, including an identical value, null, or a malformed timestamp. The raw JSON value checks in section 6, including NUL keys, non-finite numbers, signed 64-bit integer range, and UTF-8 validity, still run first. If those checks pass, return `400 forbidden_field` before Pydantic validation, value partitioning, or any repository operation. Reject the entire patch, including any otherwise valid fields in the same body. Do not read the session first.
+
+A nested `started_at` remains unknown data. For example, `{"metadata":{"started_at":"value"}}` treats the top-level `metadata` name as an ordinary extra and stores the object at `metadata.metadata`. It does not target the root field.
 
 Recognize and validate these root fields:
 
 | Field | Rule |
 | --- | --- |
-| `started_at` | Mutable while open. Non-null aware RFC 3339 string. |
 | `status` | Non-null. If supplied, only `COMPLETED` or `FAILED`. |
 | `completion_time` | Aware RFC 3339 string or explicit null. |
 | `last_step_executed` | Non-null list of strict step-name strings. Replace the whole list. |
@@ -801,7 +805,7 @@ GET /v1/sessions?status=COMPLETED&boundary=payments&page_size=25&cursor=djF8bmV4
 - The page boundary is the `(started_at, _id)` sort key of the first or last returned record and is exclusive. Read one record beyond the page size to decide whether the travelled direction continues. Determine the opposite direction with its own existence check rather than assuming it, because the anchored record may no longer match the filters.
 - Reading backward sorts ascending from the boundary and then restores the response to newest-first order.
 - A cursor is a continuation value, not a credential. It is not signed and carries no secret. It encodes a version, the direction, the boundary sort key, and a fingerprint of the filters and page size. Reject a cursor with an unexpected alphabet, length, structure, version, direction, or identifier shape, and reject one whose fingerprint does not match the current request, all with `400 invalid_field`. Validate the cursor before issuing any database operation. A different `fields` selection is allowed with the same cursor because selection changes neither membership nor ordering.
-- `started_at` is mutable while a session is open. Editing it, or editing a value a filter matches, can move a session between pages, so a full traversal can skip or repeat a record. Accept this; do not add snapshots, server-side cursor state, or compensating locks.
+- The `(started_at, _id)` sort key does not change after creation. Editing a value used by a filter can change membership between page reads. A forward traversal can omit a session that leaves the result set or begins matching after its tuple has already been passed. It cannot repeat an already returned tuple because page boundaries are exclusive. Accept this live, non-snapshot behavior; do not add snapshots, server-side cursor state, or compensating locks.
 - A valid cursor whose remaining matches have disappeared returns an empty `items` array, both cursors null, and the current `total_count`. Do not return `404` and do not silently restart from the first page.
 
 ### `GET /v1/sessions/{session_id}`
@@ -1111,7 +1115,7 @@ The list uses `next_cursor` and `previous_cursor` from the page envelope. Cursor
 
 Applied filters, a nondefault page size, and the current cursor live in the browser query string. Refresh, shared links, and browser history restore those applied parameters. Draft inputs are not URL state. Filter values, including `invoked_by_email`, are visible in the address bar, shared links, and browser history. They may also appear in HTTP access logs. This POC adds no privacy protection for query parameters.
 
-`total_count` is the live count for the applied filters, not the number of rows on the current page. The count and rows come from separate reads and are not a snapshot. Writes and edits can make a traversal skip or repeat records.
+`total_count` is the live count for the applied filters, not the number of rows on the current page. The count and rows come from separate reads and are not a snapshot. New sessions and edits to filtered values can change membership between reads, so next and previous pages are not snapshots of one fixed result set.
 
 When `items` is empty, the view distinguishes these cases:
 
@@ -1269,6 +1273,8 @@ Cover at least these cases:
 - A flat input `metadata` becomes `metadata.metadata`; a flat input `details` becomes `details.details`.
 - Timestamps are real BSON datetimes, timezone-aware on mapping, normalized to UTC, and serialized with milliseconds.
 - Missing and explicit null remain distinct on patch.
+- After raw JSON value validation passes, every session patch containing top-level `started_at` returns `400 forbidden_field` before Pydantic or repository operations, including when the value is identical, null, or a malformed timestamp. The whole patch is rejected, so valid sibling fields are not applied.
+- Raw JSON value errors still take precedence over the patch `started_at` rejection. Nested fields named `started_at` remain data in their containing objects and are not treated as the reserved root field.
 - `at` and `occurred_at` together return `timestamp_conflict`.
 - Empty patch returns `200` through `matched_count == 1`, even when `modified_count == 0`.
 - Omitted patch fields remain unchanged.

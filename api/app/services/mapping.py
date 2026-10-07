@@ -21,11 +21,10 @@ SESSION_CREATE_RESERVED_FIELDS = frozenset(
 )
 SESSION_CREATE_CONSUMED_FIELDS = frozenset({"started_at"})
 SESSION_PATCH_RESERVED_FIELDS = frozenset(
-    {"_id", "session_id", "received_at", "schema_version"}
+    {"_id", "session_id", "received_at", "schema_version", "started_at"}
 )
 SESSION_PATCH_CONSUMED_FIELDS = frozenset(
     {
-        "started_at",
         "status",
         "completion_time",
         "last_step_executed",

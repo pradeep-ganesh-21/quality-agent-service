@@ -28,6 +28,7 @@ Do not edit the legacy sample, schema draft, requirements prose, or architecture
 - Remember that async PyMongo `find()` returns a cursor synchronously. Do not await `find()`.
 - Preserve unknown parsed JSON under server-created `metadata` and `details` wrappers. Do not flatten, rewrite, evaluate, index, or use it for business rules.
 - Reject reserved top-level fields before Pydantic. Nested `_id`, dotted keys, and dollar-prefixed keys are allowed subject to DESIGN.md validation.
+- Treat root session `started_at` as creation-only. Reject it on every session `PATCH` with `400 forbidden_field` before Pydantic or repository operations.
 - Persist Python datetimes, not JSON-dumped strings. Store ObjectIds and map them explicitly to response strings.
 - Implement session patch as the single guarded pipeline update in DESIGN.md. Use `$literal` for every supplied value and always shallow-merge metadata with `$mergeObjects`.
 - Use `matched_count` for patch success. Do not use `modified_count` as the success test.

@@ -123,7 +123,6 @@ def test_patch_issues_one_guarded_pipeline_update_without_upsert(repository):
         "completion_time": RECEIVED_AT,
         "last_step_executed": ["pair-actions"],
         "execution_outcome": {"defect_count": 2, "unknown": {"$set": "$status"}},
-        "started_at": STARTED_AT,
     }
     extras = {"invoked_by": {"name": "Operator"}, "a.b": {"$set": "$status"}}
     assert asyncio.run(repo.patch_open_session(SESSION_ID, known, extras)) == SESSION_ID

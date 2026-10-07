@@ -190,10 +190,10 @@ def test_create_reserved_field_list_matches_the_documented_names():
         "status", "completion_time", "last_step_executed", "execution_outcome",
     })
     assert SESSION_PATCH_RESERVED_FIELDS == frozenset({
-        "_id", "session_id", "received_at", "schema_version",
+        "_id", "session_id", "received_at", "schema_version", "started_at",
     })
     assert SESSION_PATCH_CONSUMED_FIELDS == frozenset({
-        "started_at", "status", "completion_time", "last_step_executed", "execution_outcome",
+        "status", "completion_time", "last_step_executed", "execution_outcome",
     })
 
 
@@ -272,7 +272,6 @@ def test_patch_forwards_only_supplied_known_fields_and_separates_extras(writes):
         "completion_time": "2026-10-01T11:18:04.500999+02:00",
         "last_step_executed": ["pair-actions", "pair-actions", "", "$status"],
         "execution_outcome": {"defect_count": 0, "unknown": {"nested": [None, -5]}},
-        "started_at": STARTED_AT_INPUT,
         **deepcopy(ARBITRARY_EXTRAS),
     })
     session_id, known, extras = sessions.patched[0]
@@ -282,9 +281,8 @@ def test_patch_forwards_only_supplied_known_fields_and_separates_extras(writes):
         "completion_time": datetime(2026, 10, 1, 9, 18, 4, 500000, tzinfo=timezone.utc),
         "last_step_executed": ["pair-actions", "pair-actions", "", "$status"],
         "execution_outcome": {"defect_count": 0, "unknown": {"nested": [None, -5]}},
-        "started_at": STORED_STARTED_AT,
     }
-    assert isinstance(known["started_at"], datetime)
+    assert isinstance(known["completion_time"], datetime)
     # A flat `metadata` key stays an ordinary extra; it is not promoted or merged.
     assert extras == ARBITRARY_EXTRAS
     assert extras["metadata"] == {"nested": "client supplied"}
@@ -332,7 +330,7 @@ def test_patch_outcomes_never_impute_zeros_or_aggregate_runs(writes):
     assert "contract_ingredient_count" not in known["execution_outcome"]
 
 
-@pytest.mark.parametrize("field", ["started_at", "status", "last_step_executed"])
+@pytest.mark.parametrize("field", ["status", "last_step_executed"])
 def test_patch_rejects_explicit_null_for_non_nullable_fields(writes, field):
     service, sessions = writes
     expect_error(ErrorCode.INVALID_FIELD, patch, service, {field: None})
@@ -356,7 +354,6 @@ def test_patch_rejects_explicit_null_for_non_nullable_fields(writes, field):
         {"execution_outcome": {"defect_count": None}},
         {"execution_outcome": {"gap_count": 2**63 - 1, "defect_count": -1}},
         {"completion_time": "2026-10-01T09:18:04"}, {"completion_time": 1790000000},
-        {"started_at": "2026-10-01"},
     ],
 )
 def test_patch_rejects_invalid_known_values_without_coercion(writes, body):
@@ -374,6 +371,49 @@ def test_patch_rejects_each_reserved_field(writes, field):
 
 
 @pytest.mark.parametrize(
+    "value",
+    [
+        STARTED_AT_INPUT, "2026-10-02T09:07:04Z", "not-a-timestamp",
+        "2026-10-01T09:07:04", None, 1790000000, True, [], {},
+    ],
+)
+def test_patch_rejects_started_at_without_forwarding_any_updates(writes, value):
+    service, sessions = writes
+    create(service, {"started_at": STARTED_AT_INPUT, "boundary": "original"})
+    original = deepcopy(sessions.created[0])
+    body = {"started_at": value, "status": "COMPLETED", "boundary": "replacement"}
+    snapshot = deepcopy(body)
+
+    expect_error(ErrorCode.FORBIDDEN_FIELD, patch, service, body)
+
+    assert sessions.patched == []
+    assert sessions.created == [original]
+    assert body == snapshot
+
+
+def test_patch_rejects_started_at_before_validating_other_known_fields(writes):
+    service, sessions = writes
+    expect_error(
+        ErrorCode.FORBIDDEN_FIELD, patch, service,
+        {"started_at": STARTED_AT_INPUT, "status": "not-a-status"},
+    )
+    assert sessions.patched == []
+
+
+def test_patch_preserves_nested_started_at_as_data(writes):
+    service, sessions = writes
+    extras = {
+        "metadata": {"started_at": "not-a-timestamp"},
+        "trace": [{"started_at": None}],
+    }
+    outcome = {"defect_count": 0, "started_at": {"$set": "$status"}}
+
+    assert patch(service, {"execution_outcome": outcome, **extras}) == SESSION_ID
+
+    assert sessions.patched == [(SESSION_ID, {"execution_outcome": outcome}, extras)]
+
+
+@pytest.mark.parametrize(
     ("code", "body"),
     [
         (ErrorCode.VALUE_OUT_OF_RANGE, {"huge": 2**63}),
@@ -382,9 +422,9 @@ def test_patch_rejects_each_reserved_field(writes, field):
         (ErrorCode.INVALID_FIELD, {"text": "\ud800"}),
     ],
 )
-def test_patch_rejects_invalid_raw_values_before_persistence(writes, code, body):
+def test_patch_rejects_invalid_raw_values_before_reserved_fields_and_persistence(writes, code, body):
     service, sessions = writes
-    expect_error(code, patch, service, body)
+    expect_error(code, patch, service, {"started_at": STARTED_AT_INPUT, **body})
     assert sessions.patched == []
 
 

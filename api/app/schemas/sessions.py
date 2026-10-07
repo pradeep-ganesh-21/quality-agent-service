@@ -29,16 +29,10 @@ class SessionPatchRequest(BaseModel):
     model_config = ConfigDict(extra="allow", strict=True, hide_input_in_errors=True)
 
     # Defaults represent omission. Validators still reject explicit null where required.
-    started_at: datetime | None = None
     status: Literal["COMPLETED", "FAILED"] | None = None
     completion_time: datetime | None = None
     last_step_executed: list[str] | None = None
     execution_outcome: dict[str, Any] | None = None
-
-    @field_validator("started_at", mode="before")
-    @classmethod
-    def validate_started_at(cls, value: Any) -> datetime:
-        return parse_timestamp(value)
 
     @field_validator("completion_time", mode="before")
     @classmethod

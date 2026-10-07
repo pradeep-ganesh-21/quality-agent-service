@@ -89,7 +89,7 @@ http://localhost:8080/?status=COMPLETED&boundary=payments&page_size=50
 
 Draft edits are not stored in the URL. Email addresses and other applied filter values are visible in the address bar, browser history, and shared links. They may also appear in access logs. Do not put a sensitive value in a filter URL.
 
-Counts are live and are not a snapshot with the current page. Sessions can move between pages while data changes. If a cursor points to an empty page but matches still exist, select **Return to newest sessions**.
+Counts are live and are not a snapshot with the current page. New sessions and edits to filtered values can change membership between reads, so next and previous pages are not snapshots of one fixed result set. If a cursor points to an empty page but matches still exist, select **Return to newest sessions**.
 
 Opening a row in the same tab lets **All sessions** return to the current list URL. When list navigation state is absent, as with a direct detail URL or a new tab, **All sessions** falls back to `/`.
 
