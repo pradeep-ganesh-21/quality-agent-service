@@ -225,7 +225,7 @@ def run_checks(base_url):
             require(body.strip(), label, "empty asset; rebuild and serve the complete React bundle.")
 
     invalid_field = {"error": {"code": "invalid_field", "message": "A request field is invalid."}}
-    selected = check_list(get_json("Selected list", "/v1/sessions?fields=started_at&fields=metadata.invoked_by.name&fields=metadata.boundary"))
+    selected = check_list(get_json("Selected list", "/v1/sessions?fields=started_at&fields=status&fields=metadata.invoked_by.email&fields=metadata.boundary"))
     ids = check_list(get_json("ID-only list", "/v1/sessions?fields=session_id"), id_only=True)
     check_list(
         get_json("Filtered list", "/v1/sessions?fields=session_id&status=COMPLETED&page_size=1"),

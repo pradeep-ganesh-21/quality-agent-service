@@ -1,9 +1,15 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { getSession, listSessionFields, listSessions } from '../src/api';
-import { SESSION_ID } from './fixtures';
+import type { SessionQuery } from '../src/types';
+import { page, SESSION_ID } from './fixtures';
 
 const fetchMock = vi.fn<typeof fetch>();
+const DEFAULT_QUERY: SessionQuery = {
+  filters: { status: '', boundary: '', invoked_by_email: '', started_from: '', started_before: '' },
+  page_size: 25,
+  cursor: '',
+};
 
 beforeEach(() => {
   fetchMock.mockReset();
@@ -19,24 +25,51 @@ function respond(value: unknown, status = 200) {
 describe('projected session reads', () => {
   it('requests only repeated, deduplicated field paths and forwards cancellation', async () => {
     const controller = new AbortController();
-    respond([{ session_id: SESSION_ID, metadata: { boundary: 'checkout' } }]);
-    const fields = ['started_at', 'metadata.invoked_by.name', 'metadata.boundary', 'started_at'];
-    expect((await listSessionFields(fields, controller.signal)).ok).toBe(true);
-    expect(fetchMock.mock.calls[0]?.[0]).toBe('/v1/sessions?fields=started_at&fields=metadata.invoked_by.name&fields=metadata.boundary');
+    respond(page([{ session_id: SESSION_ID, metadata: { boundary: 'checkout' } }]));
+    const fields = ['started_at', 'metadata.invoked_by.email', 'metadata.boundary', 'started_at'];
+    expect((await listSessionFields(fields, undefined, controller.signal)).ok).toBe(true);
+    expect(fetchMock.mock.calls[0]?.[0]).toBe('/v1/sessions?fields=started_at&fields=metadata.invoked_by.email&fields=metadata.boundary&page_size=25');
     expect(fetchMock.mock.calls[0]?.[1]?.signal).toBe(controller.signal);
     expect(fields).toHaveLength(4);
   });
 
   it('encodes unusual field names without introducing another query parameter', async () => {
-    respond([]);
+    respond(page([]));
     await listSessionFields(['metadata.label & value']);
-    expect(fetchMock.mock.calls[0]?.[0]).toBe('/v1/sessions?fields=metadata.label+%26+value');
+    expect(fetchMock.mock.calls[0]?.[0]).toBe('/v1/sessions?fields=metadata.label+%26+value&page_size=25');
   });
 
   it('requests ID-only records explicitly when there are no field dependencies', async () => {
-    respond([{ session_id: SESSION_ID }]);
-    expect(await listSessionFields([])).toEqual({ ok: true, data: [{ session_id: SESSION_ID }] });
-    expect(fetchMock.mock.calls[0]?.[0]).toBe('/v1/sessions?fields=session_id');
+    respond(page([{ session_id: SESSION_ID }]));
+    expect(await listSessionFields([])).toEqual({ ok: true, data: page([{ session_id: SESSION_ID }]) });
+    expect(fetchMock.mock.calls[0]?.[0]).toBe('/v1/sessions?fields=session_id&page_size=25');
+  });
+
+  it('sends every supplied filter, the page size, and the cursor exactly once', async () => {
+    respond(page([]));
+    await listSessionFields(['status'], {
+      filters: {
+        status: 'COMPLETED',
+        boundary: ' Check.out* ',
+        invoked_by_email: 'Operator+Tag@Example.invalid',
+        started_from: '2026-10-01T03:37:00.000Z',
+        started_before: '2026-10-02T03:37:00.000Z',
+      },
+      page_size: 100,
+      cursor: 'djF8bmV4dHwx',
+    });
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(
+      '/v1/sessions?fields=status&status=COMPLETED&boundary=+Check.out*+'
+      + '&invoked_by_email=Operator%2BTag%40Example.invalid'
+      + '&started_from=2026-10-01T03%3A37%3A00.000Z&started_before=2026-10-02T03%3A37%3A00.000Z'
+      + '&page_size=100&cursor=djF8bmV4dHwx',
+    );
+  });
+
+  it('omits filters that are not applied', async () => {
+    respond(page([]));
+    await listSessionFields(['status'], { ...DEFAULT_QUERY, filters: { ...DEFAULT_QUERY.filters, status: 'FAILED' } });
+    expect(fetchMock.mock.calls[0]?.[0]).toBe('/v1/sessions?fields=status&status=FAILED&page_size=25');
   });
 
   it.each([
@@ -48,23 +81,24 @@ describe('projected session reads', () => {
     [{ session_id: SESSION_ID, execution_outcome: { defect_count: 0, extra: { value: true } } }],
     [{ session_id: SESSION_ID, started_at: '2026-10-01T09:07:04.000Z', status: 'FAILED' }],
   ].map((records) => ({ records })))('preserves partial values without filling omitted fields: $records', async ({ records }) => {
-    respond(records);
-    expect(await listSessionFields(['metadata'])).toEqual({ ok: true, data: records });
+    respond(page(records));
+    expect(await listSessionFields(['metadata'])).toEqual({ ok: true, data: page(records) });
   });
 
   it('retains exact int64 values inside projected outcomes and arbitrary metadata', async () => {
-    fetchMock.mockResolvedValue(new Response(`[{"session_id":"${SESSION_ID}","execution_outcome":{"defect_count":9223372036854775807},"metadata":{"boundary":{"__proto__":-9223372036854775808}}}]`, {
+    fetchMock.mockResolvedValue(new Response(`{"items":[{"session_id":"${SESSION_ID}","execution_outcome":{"defect_count":9223372036854775807},"metadata":{"boundary":{"__proto__":-9223372036854775808}}}],"page_size":25,"total_count":9223372036854775807,"next_cursor":null,"previous_cursor":null}`, {
       headers: { 'Content-Type': 'application/json' },
     }));
     const result = await listSessionFields(['execution_outcome.defect_count', 'metadata.boundary']);
     expect(result.ok).toBe(true);
     if (!result.ok) throw new Error('Expected a projected result.');
-    expect(result.data[0]?.execution_outcome?.defect_count).toBe(9223372036854775807n);
-    expect(result.data[0]?.metadata?.boundary).toHaveProperty('__proto__', -9223372036854775808n);
+    expect(result.data.total_count).toBe(9223372036854775807n);
+    expect(result.data.items[0]?.execution_outcome?.defect_count).toBe(9223372036854775807n);
+    expect(result.data.items[0]?.metadata?.boundary).toHaveProperty('__proto__', -9223372036854775808n);
   });
 
   it.each([
-    {}, null, [null], [{}], [{ session_id: 'bad-id' }],
+    [null], [{}], [{ session_id: 'bad-id' }],
     [{ session_id: SESSION_ID, runs: [] }],
     [{ session_id: SESSION_ID, metadata: null }],
     [{ session_id: SESSION_ID, metadata: [] }],
@@ -76,13 +110,21 @@ describe('projected session reads', () => {
     [{ session_id: SESSION_ID, last_step_executed: 'step' }],
     [{ session_id: SESSION_ID, execution_outcome: { gap_count: '0' } }],
     [{ session_id: SESSION_ID, invented_root: 'value' }],
-  ].map((records) => ({ records })))('rejects invalid projected shapes and present fields: $records', async ({ records }) => {
-    respond(records);
+  ].map((records) => ({ records })))('rejects invalid projected records: $records', async ({ records }) => {
+    respond(page(records));
     expect(await listSessionFields(['metadata'])).toMatchObject({ ok: false, error: { kind: 'invalid_response' } });
   });
 
+  it.each([{}, null, [], [{ session_id: SESSION_ID }]])(
+    'rejects a response that is not the five-field envelope: %j',
+    async (value) => {
+      respond(value);
+      expect(await listSessionFields(['metadata'])).toMatchObject({ ok: false, error: { kind: 'invalid_response' } });
+    },
+  );
+
   it('does not weaken the original full-summary or full-detail decoders', async () => {
-    respond([{ session_id: SESSION_ID }]);
+    respond(page([{ session_id: SESSION_ID }]));
     expect(await listSessions()).toMatchObject({ ok: false, error: { kind: 'invalid_response' } });
     respond({ session_id: SESSION_ID, metadata: {} });
     expect(await getSession(SESSION_ID)).toMatchObject({ ok: false, error: { kind: 'invalid_response' } });

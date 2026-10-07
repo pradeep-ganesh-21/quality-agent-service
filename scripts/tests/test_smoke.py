@@ -18,7 +18,7 @@ spec = importlib.util.spec_from_file_location("smoke", Path(__file__).resolve().
 smoke = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(smoke)
 
-SELECTED = "/v1/sessions?fields=started_at&fields=metadata.invoked_by.name&fields=metadata.boundary"
+SELECTED = "/v1/sessions?fields=started_at&fields=status&fields=metadata.invoked_by.email&fields=metadata.boundary"
 IDS = "/v1/sessions?fields=session_id"
 FILTERED = "/v1/sessions?fields=session_id&status=COMPLETED&page_size=1"
 INVALID = "/v1/sessions?fields=runs"

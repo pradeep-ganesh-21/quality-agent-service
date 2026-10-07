@@ -1,27 +1,38 @@
 import { useCallback } from 'react';
-import { Link, useParams } from 'react-router-dom';
+import { Link, useLocation, useParams } from 'react-router-dom';
 
 import { getSession } from './api';
-import { formatCount, formatTimestamp } from './format';
+import { formatCount, formatTimestamp, localZoneLabel } from './format';
 import { JsonBlock, JsonValueText } from './JsonBlock';
 import { ErrorNotice, LoadingNotice } from './ReadNotice';
 import type { SessionDetail as SessionDetailRecord } from './types';
 import { useApiRead } from './useApiRead';
 
+// The list passes its own path so filters and the current page survive a return.
+function listPathFromState(state: unknown): string {
+  if (typeof state !== 'object' || state === null) return '/';
+  const path: unknown = (state as { listPath?: unknown }).listPath;
+  // Honour only an in-application path, never a protocol-relative or absolute URL.
+  if (typeof path !== 'string' || !path.startsWith('/') || path.startsWith('//')) return '/';
+  return path;
+}
+
 export function SessionDetail() {
   const { sessionId = '' } = useParams();
+  const { state } = useLocation();
   const load = useCallback((signal: AbortSignal) => getSession(sessionId, signal), [sessionId]);
-  const state = useApiRead(`session:${sessionId}`, load);
+  const read = useApiRead(`session:${sessionId}`, load);
 
   return (
     <section aria-labelledby="session-heading">
       <header className="page-heading">
-        <Link className="back-link" to="/">← All sessions</Link>
+        <Link className="back-link" to={listPathFromState(state)}>← All sessions</Link>
         <h1 id="session-heading">Session details</h1>
+        <p className="muted">Times are shown in {localZoneLabel()}.</p>
       </header>
-      {state.status === 'loading' && <LoadingNotice>Loading session…</LoadingNotice>}
-      {state.status === 'error' && <ErrorNotice error={state.error} />}
-      {state.status === 'ready' && <SessionRecord key={state.data.session_id} session={state.data} />}
+      {read.status === 'loading' && <LoadingNotice>Loading session…</LoadingNotice>}
+      {read.status === 'error' && <ErrorNotice error={read.error} />}
+      {read.status === 'ready' && <SessionRecord key={read.data.session_id} session={read.data} />}
     </section>
   );
 }

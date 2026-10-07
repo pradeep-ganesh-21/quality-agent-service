@@ -7,15 +7,28 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from '../src/App';
 import { SESSION_COLUMNS } from '../src/sessionColumns';
 import type { SessionColumn } from '../src/sessionColumns';
-import { LARGE_DETAIL_JSON, run, SESSION_ID, summary } from './fixtures';
+import { LARGE_DETAIL_JSON, page, run, SESSION_ID, summary } from './fixtures';
 
 const OTHER_ID = '68df8b00aef4d8537282f099';
-const LIST_URL = '/v1/sessions?fields=started_at&fields=metadata.invoked_by.name&fields=metadata.boundary';
+
+function listUrl(...fields: string[]) {
+  const selected = fields.length === 0
+    ? ['started_at', 'status', 'metadata.invoked_by.email', 'metadata.boundary']
+    : fields;
+  return `/v1/sessions?${selected.map((field) => `fields=${field}`).join('&')}&page_size=25`;
+}
+
+const LIST_URL = listUrl();
 const fetchMock = vi.fn<typeof fetch>();
 const listRow = {
   session_id: SESSION_ID,
   started_at: summary.started_at,
-  metadata: { invoked_by: { name: 'Avery Chen' }, boundary: 'checkout' },
+  status: 'COMPLETED',
+  metadata: { invoked_by: { email: 'operator@example.invalid' }, boundary: 'checkout' },
+};
+
+const receivedColumn: SessionColumn = {
+  key: 'received_at', header: 'Received at', requiredFields: ['received_at'], renderCell: (row) => row.received_at,
 };
 
 function jsonResponse(value: unknown, status = 200) {
@@ -43,19 +56,30 @@ beforeEach(() => {
 });
 
 describe('session table', () => {
-  it('requests exactly the configured fields and renders only the three columns', async () => {
-    fetchMock.mockResolvedValue(jsonResponse([listRow]));
+  it('requests exactly the configured fields and renders the four columns in local time', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(page([listRow])));
     render(application());
     const table = await screen.findByRole('table');
     expect(within(table).getAllByRole('columnheader').map((cell) => cell.textContent)).toEqual([
-      'Started at (UTC)', 'Invoked by', 'Boundary',
+      'Started at', 'Status', 'Invoked by', 'Boundary',
     ]);
-    expect(within(table).getAllByRole('cell')).toHaveLength(3);
-    expect(within(table).getByText('2026-10-01 09:07:04.000 UTC')).toBeInTheDocument();
-    expect(within(table).getByText('Avery Chen')).toBeInTheDocument();
+    expect(within(table).getAllByRole('cell')).toHaveLength(4);
+    expect(within(table).getByText('2026-10-01 14:37:04.000')).toBeInTheDocument();
+    expect(within(table).getByText('2026-10-01 14:37:04.000').closest('time'))
+      .toHaveAttribute('dateTime', '2026-10-01T09:07:04.000Z');
+    expect(within(table).getByText('COMPLETED')).toBeInTheDocument();
+    expect(within(table).getByText('operator@example.invalid')).toBeInTheDocument();
     expect(within(table).getByText('checkout')).toBeInTheDocument();
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(fetchMock.mock.calls[0]?.[0]).toBe(LIST_URL);
+  });
+
+  it('names the browser time zone for the displayed times', async () => {
+    fetchMock.mockResolvedValue(jsonResponse(page([listRow])));
+    render(application());
+    await screen.findByRole('table');
+    const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    expect(screen.getByText(`Open a session to inspect its execution record. Times are shown in ${zone}.`)).toBeInTheDocument();
   });
 
   it('renders a pending load followed by the empty state', async () => {
@@ -63,7 +87,7 @@ describe('session table', () => {
     fetchMock.mockReturnValue(pending.promise);
     render(application());
     expect(screen.getByRole('status')).toHaveTextContent('Loading sessions');
-    await act(async () => pending.resolve(jsonResponse([])));
+    await act(async () => pending.resolve(jsonResponse(page([]))));
     expect(await screen.findByText('No sessions have been recorded yet.')).toBeInTheDocument();
     expect(screen.queryByRole('table')).not.toBeInTheDocument();
   });
@@ -71,9 +95,9 @@ describe('session table', () => {
   it('preserves row order and differentiates missing, null, zero, and structured values', async () => {
     const rows = [
       { session_id: OTHER_ID, metadata: { boundary: null } },
-      { ...listRow, metadata: { invoked_by: { name: 0 }, boundary: { nested: [false, 'text'] } } },
+      { ...listRow, status: 'FAILED', metadata: { invoked_by: { email: 0 }, boundary: { nested: [false, 'text'] } } },
     ];
-    fetchMock.mockResolvedValue(jsonResponse(rows));
+    fetchMock.mockResolvedValue(jsonResponse(page(rows)));
     render(application());
     const table = await screen.findByRole('table');
     const links = within(table).getAllByRole('link');
@@ -81,38 +105,39 @@ describe('session table', () => {
     const cells = within(table).getAllByRole('cell');
     expect(cells[0]).toHaveTextContent('Not provided');
     expect(cells[1]).toHaveTextContent('Not provided');
-    expect(cells[2]).toHaveTextContent('null');
-    expect(cells[4]).toHaveTextContent('0');
-    expect(cells[5]).toHaveTextContent('"nested"');
-    expect(cells[5]).toHaveTextContent('false');
+    expect(cells[2]).toHaveTextContent('Not provided');
+    expect(cells[3]).toHaveTextContent('null');
+    expect(cells[5]).toHaveTextContent('FAILED');
+    expect(cells[6]).toHaveTextContent('0');
+    expect(cells[7]).toHaveTextContent('"nested"');
+    expect(cells[7]).toHaveTextContent('false');
   });
 
   it('changes requests and headers when code configuration adds or removes columns', async () => {
-    const statusColumn: SessionColumn = {
-      key: 'status', header: 'Status', requiredFields: ['status'], renderCell: (row) => row.status,
-    };
-    fetchMock.mockImplementation(async () => jsonResponse([{ ...listRow, status: 'FAILED' }]));
+    fetchMock.mockImplementation(async () => jsonResponse(page([{ ...listRow, received_at: summary.received_at }])));
     const view = render(application());
     await screen.findByRole('table');
-    view.rerender(application('/', [...SESSION_COLUMNS, statusColumn]));
-    await screen.findByRole('columnheader', { name: 'Status' });
-    expect(fetchMock.mock.lastCall?.[0]).toBe(`${LIST_URL}&fields=status`);
-    view.rerender(application('/', [statusColumn]));
+    view.rerender(application('/', [...SESSION_COLUMNS, receivedColumn]));
+    await screen.findByRole('columnheader', { name: 'Received at' });
+    expect(fetchMock.mock.lastCall?.[0]).toBe(
+      listUrl('started_at', 'status', 'metadata.invoked_by.email', 'metadata.boundary', 'received_at'),
+    );
+    view.rerender(application('/', [receivedColumn]));
     const table = await screen.findByRole('table');
     expect(within(table).getAllByRole('columnheader')).toHaveLength(1);
-    expect(fetchMock.mock.lastCall?.[0]).toBe('/v1/sessions?fields=status');
-    expect(within(table).getByRole('link')).toHaveTextContent('FAILED');
+    expect(fetchMock.mock.lastCall?.[0]).toBe(listUrl('received_at'));
+    expect(within(table).getByRole('link')).toHaveTextContent(summary.received_at);
   });
 
   it('uses an explicit ID-only request for a column with no data dependencies', async () => {
-    fetchMock.mockResolvedValue(jsonResponse([{ session_id: SESSION_ID }]));
+    fetchMock.mockResolvedValue(jsonResponse(page([{ session_id: SESSION_ID }])));
     render(application('/', [{ key: 'record', header: 'Record', requiredFields: [], renderCell: () => 'Open' }]));
     await screen.findByRole('table');
-    expect(fetchMock.mock.calls[0]?.[0]).toBe('/v1/sessions?fields=session_id');
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(listUrl('session_id'));
   });
 
   it('does not render inaccessible empty rows or fetch data with no configured columns', async () => {
-    fetchMock.mockResolvedValue(jsonResponse([listRow]));
+    fetchMock.mockResolvedValue(jsonResponse(page([listRow])));
     const view = render(application('/', []));
     expect(screen.getByRole('alert')).toHaveTextContent('No session columns are configured.');
     expect(screen.queryByRole('table')).not.toBeInTheDocument();
@@ -122,7 +147,7 @@ describe('session table', () => {
   });
 
   it('does not refetch when a fresh column array has the same field dependencies', async () => {
-    fetchMock.mockResolvedValue(jsonResponse([listRow]));
+    fetchMock.mockResolvedValue(jsonResponse(page([listRow])));
     const view = render(application());
     await screen.findByRole('table');
     view.rerender(application('/', SESSION_COLUMNS.map((column) => ({ ...column, header: `${column.header} label` }))));
@@ -133,7 +158,9 @@ describe('session table', () => {
 
   it('renders markup in selected fields as text', async () => {
     const markup = '<img src=x onerror="alert(1)">';
-    fetchMock.mockResolvedValue(jsonResponse([{ ...listRow, metadata: { invoked_by: { name: markup }, boundary: '<script>x</script>' } }]));
+    fetchMock.mockResolvedValue(jsonResponse(page([{
+      ...listRow, metadata: { invoked_by: { email: markup }, boundary: '<script>x</script>' },
+    }])));
     render(application());
     await screen.findByText(markup);
     expect(document.querySelector('img')).toBeNull();
@@ -144,7 +171,7 @@ describe('session table', () => {
 describe('session navigation', () => {
   it('loads complete details on a row click, without using the partial list as detail', async () => {
     const user = userEvent.setup();
-    fetchMock.mockImplementation(async (url) => url === LIST_URL ? jsonResponse([listRow]) : rawResponse(LARGE_DETAIL_JSON));
+    fetchMock.mockImplementation(async (url) => url === LIST_URL ? jsonResponse(page([listRow])) : rawResponse(LARGE_DETAIL_JSON));
     render(application());
     await user.click(await screen.findByText('checkout'));
     expect(await screen.findByRole('heading', { name: 'Session details' })).toBeInTheDocument();
@@ -160,7 +187,9 @@ describe('session navigation', () => {
 
   it('supports keyboard links without causing two detail requests', async () => {
     const user = userEvent.setup();
-    fetchMock.mockImplementation(async (url) => url === LIST_URL ? jsonResponse([listRow]) : jsonResponse({ ...summary, metadata: {}, runs: [] }));
+    fetchMock.mockImplementation(async (url) => url === LIST_URL
+      ? jsonResponse(page([listRow]))
+      : jsonResponse({ ...summary, metadata: {}, runs: [] }));
     render(application());
     const table = await screen.findByRole('table');
     const link = within(table).getByRole('link');
@@ -175,7 +204,7 @@ describe('session navigation', () => {
   });
 
   it('keeps real hrefs for new-tab navigation and ignores modified row clicks', async () => {
-    fetchMock.mockResolvedValue(jsonResponse([listRow]));
+    fetchMock.mockResolvedValue(jsonResponse(page([listRow])));
     render(application());
     const table = await screen.findByRole('table');
     expect(within(table).getByRole('link')).toHaveAttribute('href', `/sessions/${SESSION_ID}`);
@@ -198,7 +227,9 @@ describe('session navigation', () => {
       const navigate = useNavigate();
       return <button onClick={() => { void navigate(-1); }}>Browser back</button>;
     }
-    fetchMock.mockImplementation(async (url) => url === LIST_URL ? jsonResponse([listRow]) : jsonResponse({ ...summary, metadata: {}, runs: [] }));
+    fetchMock.mockImplementation(async (url) => url === LIST_URL
+      ? jsonResponse(page([listRow]))
+      : jsonResponse({ ...summary, metadata: {}, runs: [] }));
     render(<MemoryRouter><BrowserControls /><App /></MemoryRouter>);
     await user.click(await screen.findByText('checkout'));
     await screen.findByText('No runs have been recorded for this session.');
@@ -229,7 +260,7 @@ describe('full session details', () => {
     const runRegion = screen.getByRole('article', { name: `Run ${run.run_id}` });
     expect(within(runRegion).getByText('actions-pairer')).toBeInTheDocument();
     expect(within(runRegion).getByText(SESSION_ID)).toBeInTheDocument();
-    expect(within(runRegion).getByText('2026-10-01 09:17:58.000 UTC')).toBeInTheDocument();
+    expect(within(runRegion).getByText('2026-10-01 14:47:58.000')).toBeInTheDocument();
     expect(screen.getByText('pair-actions', { selector: 'li' }).querySelector('a')).toBeNull();
     await user.click(screen.getByText('Metadata JSON', { selector: 'summary' }));
     expect((await screen.findByLabelText('Metadata JSON', { selector: 'pre' })).textContent).toContain('<script>alert(1)</script>');
@@ -288,15 +319,19 @@ describe('request failures and lifecycle', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  it('shows malformed selected responses as an error instead of a broken table', async () => {
-    fetchMock.mockResolvedValue(jsonResponse([{ session_id: SESSION_ID, started_at: 'bad timestamp' }]));
+  it.each([
+    page([{ session_id: SESSION_ID, started_at: 'bad timestamp' }]),
+    [listRow],
+    { ...page([listRow]), extra: 1 },
+  ])('shows a malformed list response as an error instead of a broken table: %j', async (body) => {
+    fetchMock.mockResolvedValue(jsonResponse(body));
     render(application());
     expect(await screen.findByRole('alert')).toHaveTextContent('The server returned an invalid response.');
     expect(screen.queryByRole('table')).not.toBeInTheDocument();
   });
 
   it('sanitizes an unexpected loader rejection', async () => {
-    const response = jsonResponse([]);
+    const response = jsonResponse(page([]));
     vi.spyOn(response.headers, 'get').mockImplementation(() => { throw new Error('private implementation details'); });
     fetchMock.mockResolvedValue(response);
     render(application());
@@ -314,7 +349,7 @@ describe('request failures and lifecycle', () => {
     const signal = fetchMock.mock.calls[0]?.[1]?.signal;
     view.unmount();
     expect(signal?.aborted).toBe(true);
-    await act(async () => pending.resolve(jsonResponse([listRow])));
+    await act(async () => pending.resolve(jsonResponse(page([listRow]))));
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
     expect(screen.queryByRole('table')).not.toBeInTheDocument();
   });
@@ -339,18 +374,18 @@ describe('request failures and lifecycle', () => {
 
   it('discards the old projection while a new column configuration loads', async () => {
     const pending = deferredResponse();
-    fetchMock.mockResolvedValueOnce(jsonResponse([listRow])).mockReturnValueOnce(pending.promise);
+    fetchMock.mockResolvedValueOnce(jsonResponse(page([listRow]))).mockReturnValueOnce(pending.promise);
     const view = render(application());
     await screen.findByText('checkout');
-    view.rerender(application('/', [{ key: 'status', header: 'Status', requiredFields: ['status'], renderCell: (row) => row.status }]));
+    view.rerender(application('/', [receivedColumn]));
     expect(screen.queryByText('checkout')).not.toBeInTheDocument();
     expect(screen.getByRole('status')).toHaveTextContent('Loading sessions');
-    await act(async () => pending.resolve(jsonResponse([{ session_id: SESSION_ID, status: 'COMPLETED' }])));
-    expect(await screen.findByRole('link', { name: /COMPLETED/ })).toBeInTheDocument();
+    await act(async () => pending.resolve(jsonResponse(page([{ session_id: SESSION_ID, received_at: summary.received_at }]))));
+    expect(await screen.findByRole('link', { name: new RegExp(summary.received_at) })).toBeInTheDocument();
   });
 
   it('handles StrictMode setup/cleanup without displaying cancellation as an error', async () => {
-    fetchMock.mockImplementation(async () => jsonResponse([listRow]));
+    fetchMock.mockImplementation(async () => jsonResponse(page([listRow])));
     render(<StrictMode>{application()}</StrictMode>);
     expect(await screen.findByRole('table')).toBeInTheDocument();
     expect(fetchMock.mock.calls[0]?.[1]?.signal?.aborted).toBe(true);

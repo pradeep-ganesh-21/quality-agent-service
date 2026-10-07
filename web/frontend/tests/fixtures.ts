@@ -1,6 +1,21 @@
-import type { Run, SessionSummary } from '../src/types';
+import type { Run, SessionPage, SessionSummary } from '../src/types';
 
 export const SESSION_ID = '68df8b00aef4d8537282f001';
+
+/** Build the five-field list envelope every list response uses. */
+export function page<T>(
+  items: T[],
+  extra: Partial<Omit<SessionPage<T>, 'items'>> = {},
+): SessionPage<T> {
+  return {
+    items,
+    page_size: 25,
+    total_count: items.length,
+    next_cursor: null,
+    previous_cursor: null,
+    ...extra,
+  };
+}
 
 export const summary: SessionSummary = {
   session_id: SESSION_ID,

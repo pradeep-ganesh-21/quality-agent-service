@@ -65,10 +65,33 @@ dd { margin: 0; overflow-wrap: anywhere; }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
 .skip-link { position: absolute; top: -10rem; left: 1rem; background: var(--surface); padding: 0.5rem 1rem; z-index: 1; }
 .skip-link:focus { top: 0.5rem; }
+button, input, select { font: inherit; color: inherit; }
+button { cursor: pointer; background: var(--surface); border: 1px solid var(--rule); border-radius: 0.3rem; padding: 0.5rem 0.9rem; }
+button:hover:not(:disabled) { background: #e9eff7; }
+button:disabled { color: var(--muted); cursor: not-allowed; }
+.button-primary { background: var(--accent); border-color: var(--accent); color: #ffffff; font-weight: 600; }
+.button-primary:hover:not(:disabled) { background: #1c4584; }
+.filter-bar { margin-bottom: 1rem; }
+.filter-toggle[aria-expanded="true"] { background: #e9eff7; }
+.filter-panel { background: var(--surface); border: 1px solid var(--rule); border-radius: 0.5rem; padding: clamp(1rem, 2vw, 1.5rem); margin-bottom: 1.5rem; }
+.filter-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 15rem), 1fr)); gap: 1rem 1.5rem; }
+.filter-field { display: flex; flex-direction: column; gap: 0.35rem; min-width: 0; }
+.filter-field label { color: var(--muted); font-size: 0.8rem; }
+.filter-field input, .filter-field select { width: 100%; padding: 0.5rem; background: var(--surface); border: 1px solid var(--rule); border-radius: 0.3rem; }
+.filter-hint { color: var(--muted); font-size: 0.75rem; margin: 0; }
+.filter-error { margin: 1.25rem 0 0; padding: 0.75rem 1rem; }
+.filter-actions { display: flex; flex-wrap: wrap; gap: 0.75rem; margin-top: 1.25rem; }
+.table-footer { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 1rem; margin-top: 1rem; }
+.result-count { margin: 0; font-size: 0.85rem; }
+.page-controls { display: flex; align-items: center; gap: 0.6rem; margin-left: auto; }
+.page-controls label { color: var(--muted); font-size: 0.8rem; white-space: nowrap; }
+.page-controls select { padding: 0.45rem; background: var(--surface); border: 1px solid var(--rule); border-radius: 0.3rem; }
+.notice button { margin-top: 0.75rem; }
 
 @media (max-width: 40rem) {
   .app-header > span { display: none; }
   .app-main { padding-top: 1.5rem; }
   .session-table th, .session-table td { padding: 0.85rem; }
   .run-record { padding-left: 0.75rem; }
+  .page-controls { margin-left: 0; }
 }

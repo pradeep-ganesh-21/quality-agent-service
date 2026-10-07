@@ -6,9 +6,13 @@ import type { SessionListRecord } from '../src/types';
 import { SESSION_ID } from './fixtures';
 
 describe('column configuration', () => {
-  it('declares exactly the three requested columns and their field dependencies', () => {
-    expect(SESSION_COLUMNS.map((column) => column.header)).toEqual(['Started at (UTC)', 'Invoked by', 'Boundary']);
-    expect(requiredSessionFields(SESSION_COLUMNS)).toEqual(['started_at', 'metadata.invoked_by.name', 'metadata.boundary']);
+  it('declares exactly the four requested columns and their field dependencies', () => {
+    expect(SESSION_COLUMNS.map((column) => column.header)).toEqual([
+      'Started at', 'Status', 'Invoked by', 'Boundary',
+    ]);
+    expect(requiredSessionFields(SESSION_COLUMNS)).toEqual([
+      'started_at', 'status', 'metadata.invoked_by.email', 'metadata.boundary',
+    ]);
   });
 
   it('deduplicates dependencies without changing column order', () => {
@@ -16,14 +20,16 @@ describe('column configuration', () => {
       key: 'duplicate', header: 'Duplicate', requiredFields: ['started_at'] as const, renderCell: () => 'value',
     }];
     expect(requiredSessionFields(columns)).toEqual(requiredSessionFields(SESSION_COLUMNS));
-    expect(columns.map((column) => column.key)).toEqual(['started_at', 'invoked_by', 'boundary', 'duplicate']);
+    expect(columns.map((column) => column.key)).toEqual([
+      'started_at', 'status', 'invoked_by', 'boundary', 'duplicate',
+    ]);
   });
 
   it.each([
     {}, { invoked_by: null }, { invoked_by: 'not an object' },
     { invoked_by: ['not an object'] }, { invoked_by: {} },
   ])('tolerates missing or non-object intermediate values: %j', (metadata) => {
-    expect(readSessionField({ session_id: SESSION_ID, metadata }, 'metadata.invoked_by.name')).toBeUndefined();
+    expect(readSessionField({ session_id: SESSION_ID, metadata }, 'metadata.invoked_by.email')).toBeUndefined();
   });
 
   it('reads own special keys without following inherited properties', () => {

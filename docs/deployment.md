@@ -102,12 +102,15 @@ In a browser:
 2. When sessions exist, click a row, inspect the detail page, expand its JSON, and navigate back.
 3. Refresh a session detail URL to check direct navigation.
 4. Check that the browser calls relative `/v1/sessions` paths through the same origin and that JavaScript/CSS load successfully.
+5. Open the filter panel, apply a status and a boundary filter, and confirm the request carries those parameters and the match count changes.
+6. Set a date and time bound and confirm it is sent as a UTC instant that matches the local time entered. Check that displayed times use the zone named on the page.
+7. Page forward and back, change the rows per page, then refresh and use browser Back to confirm the URL restores the same filters and page.
 
 Use `docker compose ps` to confirm only NGINX publishes `0.0.0.0:8080`. API/web health checks are internal process-liveness checks. They do not prove frontend packaging or database readiness. Entry HTML uses `Cache-Control: no-cache` to revalidate references to generated asset hashes after deployment.
 
 ## Changing session columns
 
-Edit `web/frontend/src/sessionColumns.tsx`. Each definition supplies the header, field dependencies, and renderer. Update the matching UI assertions and rebuild/redeploy the web image. The initial columns request `started_at`, `metadata.invoked_by.name`, and `metadata.boundary`.
+Edit `web/frontend/src/sessionColumns.tsx`. Each definition supplies the header, field dependencies, and renderer. Update the matching UI assertions and rebuild/redeploy the web image. The current columns request `started_at`, `status`, `metadata.invoked_by.email`, and `metadata.boundary`.
 
 The smoke script uses that initial selection as a representative API check; it does not derive its selector from the frontend configuration. Update the smoke selector and its tests if the deployment check should exercise a different set of columns.
 

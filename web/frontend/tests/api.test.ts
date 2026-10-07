@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { getSession, listSessions } from '../src/api';
 import { stringifyJson } from '../src/json';
 import type { JsonValue } from '../src/types';
-import { LARGE_DETAIL_JSON, run, SESSION_ID, summary } from './fixtures';
+import { LARGE_DETAIL_JSON, page, run, SESSION_ID, summary } from './fixtures';
 
 const fetchMock = vi.fn<typeof fetch>();
 
@@ -24,9 +24,9 @@ function respondWithText(text: string, status = 200): void {
 }
 
 describe('session reads', () => {
-  it('uses the exact list URL and GET without pagination, retries, or an upstream URL', async () => {
-    respond([summary]);
-    expect(await listSessions()).toEqual({ ok: true, data: [summary] });
+  it('uses the exact default list URL and GET without retries or an upstream URL', async () => {
+    respond(page([summary]));
+    expect(await listSessions()).toEqual({ ok: true, data: page([summary]) });
     expect(fetchMock).toHaveBeenCalledExactlyOnceWith('/v1/sessions', {
       method: 'GET',
       headers: { Accept: 'application/json' },
@@ -34,9 +34,12 @@ describe('session reads', () => {
     });
   });
 
-  it('accepts an empty list', async () => {
-    respond([]);
-    expect(await listSessions()).toEqual({ ok: true, data: [] });
+  it('accepts an empty page and reports the live match count', async () => {
+    respond(page([], { total_count: 318, next_cursor: null, previous_cursor: 'djF8cHJldg' }));
+    expect(await listSessions()).toEqual({
+      ok: true,
+      data: page([], { total_count: 318, previous_cursor: 'djF8cHJldg' }),
+    });
   });
 
   it('returns every session in backend order', async () => {
@@ -44,8 +47,11 @@ describe('session reads', () => {
       ...summary,
       session_id: index.toString(16).padStart(24, '0'),
     }));
-    respond(values);
-    expect(await listSessions()).toEqual({ ok: true, data: values });
+    respond(page(values, { page_size: 100, total_count: 9007199254740991 }));
+    expect(await listSessions()).toEqual({
+      ok: true,
+      data: page(values, { page_size: 100, total_count: 9007199254740991 }),
+    });
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
@@ -103,18 +109,18 @@ describe('session reads', () => {
   });
 
   it('accepts media type parameters and case differences', async () => {
-    fetchMock.mockResolvedValue(new Response('[]', {
+    fetchMock.mockResolvedValue(new Response(stringifyJson(page([])), {
       headers: { 'Content-Type': 'Application/JSON; charset=utf-8' },
     }));
-    expect(await listSessions()).toEqual({ ok: true, data: [] });
+    expect(await listSessions()).toEqual({ ok: true, data: page([]) });
   });
 
   it.each([null, {}, { gap_count: null }, { defect_count: 0 }, { extra: { arbitrary: true } }])(
     'preserves unknown, missing, and zero outcome counts: %j',
     async (execution_outcome) => {
       const value = { ...summary, execution_outcome };
-      respond([value]);
-      expect(await listSessions()).toEqual({ ok: true, data: [value] });
+      respond(page([value]));
+      expect(await listSessions()).toEqual({ ok: true, data: page([value]) });
     },
   );
 });
@@ -150,7 +156,7 @@ describe('HTTP and response failures', () => {
   });
 
   it.each(['text/html', 'text/plain', 'application/jsonp', ''])('rejects a non-JSON success with content type %s', async (mediaType) => {
-    fetchMock.mockResolvedValue(new Response('[]', { headers: { 'Content-Type': mediaType } }));
+    fetchMock.mockResolvedValue(new Response(stringifyJson(page([])), { headers: { 'Content-Type': mediaType } }));
     expect(await listSessions()).toEqual({
       ok: false,
       error: { kind: 'invalid_response', status: 200, message: 'The server returned an invalid response.' },
@@ -181,14 +187,29 @@ describe('HTTP and response failures', () => {
     },
   );
 
-  it.each([null, {}, [null], [1], [summary, null]])('rejects invalid list shapes without dropping rows: %j', async (value) => {
-    respond(value);
+  it.each([
+    null,
+    {},
+    [summary],
+    page([summary, null]),
+    page([1]),
+    { ...page([summary]), extra: true },
+    { items: [summary], page_size: 25, total_count: 1, next_cursor: null },
+    page([summary], { page_size: 0 }),
+    page([summary], { page_size: 101 }),
+    page([summary], { page_size: 25.5 }),
+    page([summary], { total_count: -1 }),
+    page([summary], { total_count: 1.5 }),
+    page([summary], { next_cursor: '' }),
+    page([summary], { previous_cursor: 7 as unknown as string }),
+  ])('rejects a non-envelope or invalid page: %j', async (value) => {
+    respond(value as JsonValue);
     expect(await listSessions()).toMatchObject({ ok: false, error: { kind: 'invalid_response' } });
   });
 
   it.each(Object.keys(summary))('requires summary field %s', async (missing) => {
     const value = Object.fromEntries(Object.entries(summary).filter(([key]) => key !== missing));
-    respondWithText(JSON.stringify([value]));
+    respondWithText(JSON.stringify(page([value])));
     expect(await listSessions()).toMatchObject({ ok: false, error: { kind: 'invalid_response' } });
   });
 
@@ -211,7 +232,7 @@ describe('HTTP and response failures', () => {
     { field: 'execution_outcome', value: { defect_count: 1.5 } },
     { field: 'execution_outcome', value: { defect_count: 9223372036854775808n } },
   ])('rejects an invalid $field without coercion', async ({ field, value }) => {
-    respond([{ ...summary, [field]: value }]);
+    respond(page([{ ...summary, [field]: value }]));
     expect(await listSessions()).toMatchObject({ ok: false, error: { kind: 'invalid_response' } });
   });
 
@@ -278,7 +299,7 @@ describe('transport and cancellation', () => {
     const response = new Response('', { headers: { 'Content-Type': 'application/json' } });
     vi.spyOn(response, 'text').mockImplementation(async () => {
       controller.abort();
-      return '[]';
+      return stringifyJson(page([]));
     });
     fetchMock.mockResolvedValue(response);
     expect(await listSessions(controller.signal)).toEqual({ ok: false, error: { kind: 'cancelled' } });

@@ -1,5 +1,6 @@
 import { parseJson } from './json';
-import { EXECUTION_OUTCOME_COUNT_FIELDS, SESSION_STATUSES } from './types';
+import { appendQueryParams } from './sessionQuery';
+import { EXECUTION_OUTCOME_COUNT_FIELDS, NEWEST_SESSION_QUERY, SESSION_STATUSES } from './types';
 import type {
   ApiErrorEnvelope,
   ApiFailure,
@@ -10,21 +11,25 @@ import type {
   Run,
   SessionDetail,
   SessionListRecord,
+  SessionPage,
+  SessionQuery,
   SessionSummary,
 } from './types';
 
-export function listSessions(signal?: AbortSignal): Promise<ApiResult<SessionSummary[]>> {
-  return getJson('/v1/sessions', isSessionList, signal);
+export function listSessions(signal?: AbortSignal): Promise<ApiResult<SessionPage<SessionSummary>>> {
+  return getJson('/v1/sessions', acceptsSummaryPage, signal);
 }
 
 export function listSessionFields(
   fields: readonly string[],
+  query: SessionQuery = NEWEST_SESSION_QUERY,
   signal?: AbortSignal,
-): Promise<ApiResult<SessionListRecord[]>> {
-  const query = new URLSearchParams();
+): Promise<ApiResult<SessionPage<SessionListRecord>>> {
+  const params = new URLSearchParams();
   const selected = fields.length === 0 ? ['session_id'] : [...new Set(fields)];
-  for (const field of selected) query.append('fields', field);
-  return getJson(`/v1/sessions?${query.toString()}`, isProjectedSessionList, signal);
+  for (const field of selected) params.append('fields', field);
+  appendQueryParams(params, query);
+  return getJson(`/v1/sessions?${params.toString()}`, acceptsProjectedPage, signal);
 }
 
 export function getSession(
@@ -175,13 +180,34 @@ function isProjectedSession(value: JsonValue): value is SessionListRecord {
     );
 }
 
-function isProjectedSessionList(value: JsonValue): value is SessionListRecord[] {
-  return Array.isArray(value) && value.every(isProjectedSession);
+function isPageSize(value: JsonValue | undefined): value is number {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 1 && value <= 100;
 }
 
-function isSessionList(value: JsonValue): value is SessionSummary[] {
-  return Array.isArray(value) && value.every(isSessionSummary);
+function isTotalCount(value: JsonValue | undefined): boolean {
+  return (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0)
+    || (typeof value === 'bigint' && value >= 0n);
 }
+
+function isCursor(value: JsonValue | undefined): boolean {
+  return value === null || (typeof value === 'string' && value.length > 0);
+}
+
+// Every list response is the five-field page envelope, never a bare array.
+function sessionPage<T extends JsonValue>(
+  acceptsItem: (value: JsonValue) => value is T,
+): (value: JsonValue) => value is SessionPage<T> {
+  return (value): value is SessionPage<T> => isObject(value)
+    && Object.keys(value).length === 5
+    && Array.isArray(value.items) && value.items.every(acceptsItem)
+    && isPageSize(value.page_size)
+    && isTotalCount(value.total_count)
+    && isCursor(value.next_cursor)
+    && isCursor(value.previous_cursor);
+}
+
+const acceptsSummaryPage = sessionPage(isSessionSummary);
+const acceptsProjectedPage = sessionPage(isProjectedSession);
 
 function isRun(value: JsonValue): value is Run {
   return isObject(value)

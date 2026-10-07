@@ -28,17 +28,25 @@ export function readSessionField(session: SessionListRecord, path: SessionFieldP
 export const SESSION_COLUMNS: readonly SessionColumn[] = [
   {
     key: 'started_at',
-    header: 'Started at (UTC)',
+    header: 'Started at',
     requiredFields: ['started_at'],
     renderCell: (session) => session.started_at === undefined
       ? <JsonValueText value={undefined} />
       : <time dateTime={session.started_at}>{formatTimestamp(session.started_at)}</time>,
   },
   {
+    key: 'status',
+    header: 'Status',
+    requiredFields: ['status'],
+    renderCell: (session) => session.status === undefined
+      ? <JsonValueText value={undefined} />
+      : <span className="status-label">{session.status}</span>,
+  },
+  {
     key: 'invoked_by',
     header: 'Invoked by',
-    requiredFields: ['metadata.invoked_by.name'],
-    renderCell: (session) => <JsonValueText value={readSessionField(session, 'metadata.invoked_by.name')} />,
+    requiredFields: ['metadata.invoked_by.email'],
+    renderCell: (session) => <JsonValueText value={readSessionField(session, 'metadata.invoked_by.email')} />,
   },
   {
     key: 'boundary',

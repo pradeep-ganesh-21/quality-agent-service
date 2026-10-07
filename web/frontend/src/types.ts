@@ -48,6 +48,49 @@ export type SessionDetail = SessionSummary & {
   runs: Run[];
 };
 
+// Every list response is this envelope, with exactly these five fields.
+export type SessionPage<T> = {
+  items: T[];
+  page_size: number;
+  // Counts every filter match, independent of the cursor and the returned page.
+  total_count: JsonNumber;
+  next_cursor: string | null;
+  previous_cursor: string | null;
+};
+
+export const SESSION_PAGE_SIZES = [25, 50, 100] as const;
+export type SessionPageSize = (typeof SESSION_PAGE_SIZES)[number];
+export const DEFAULT_SESSION_PAGE_SIZE: SessionPageSize = 25;
+
+// Filter names are the API query parameter names. An empty value means absent.
+export const SESSION_FILTER_NAMES = [
+  'status', 'boundary', 'invoked_by_email', 'started_from', 'started_before',
+] as const;
+export type SessionFilterName = (typeof SESSION_FILTER_NAMES)[number];
+
+// Applied filters. Timestamps are RFC 3339 UTC strings, as the API accepts them.
+export type SessionFilters = Readonly<Record<SessionFilterName, string>>;
+
+// Draft filters held by the form. Timestamps are local `datetime-local` values.
+export type SessionFilterDraft = Readonly<Record<SessionFilterName, string>>;
+
+export type SessionQuery = Readonly<{
+  filters: SessionFilters;
+  page_size: SessionPageSize;
+  // Opaque continuation value from a previous response; empty means newest page.
+  cursor: string;
+}>;
+
+export const EMPTY_SESSION_FILTERS: SessionFilters = {
+  status: '', boundary: '', invoked_by_email: '', started_from: '', started_before: '',
+};
+
+export const NEWEST_SESSION_QUERY: SessionQuery = {
+  filters: EMPTY_SESSION_FILTERS,
+  page_size: DEFAULT_SESSION_PAGE_SIZE,
+  cursor: '',
+};
+
 export type ApiErrorEnvelope = {
   error: { code: string; message: string };
 };
