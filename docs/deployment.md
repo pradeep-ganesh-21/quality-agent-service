@@ -4,6 +4,8 @@ Open **http://localhost:8080/** after deployment and verification. NGINX is the 
 
 This POC is HTTP-only and unauthenticated. Anyone who can reach port 8080 can read and write API data. Request bodies and session detail reads are unbounded, and explicit full-metadata selection can use substantial memory and bandwidth. Session list reads are bounded to one page of at most 100 records, but any caller can still walk every page and can request substring filters that the server evaluates without a supporting index. This is not a production deployment.
 
+The same applies to the soft-delete routes, `DELETE /v1/sessions/{session_id}` and `POST /v1/sessions/bulk-delete`. Any caller that can reach port 8080 can soft-delete every session. Keeping these routes to one operator is an intention, not a control. Soft-deleted sessions disappear from the sessions list but remain in MongoDB and stay readable by direct detail URL. See [Removing soft-deleted data](#removing-soft-deleted-data) for permanent removal.
+
 ## Prerequisites
 
 - Docker with Compose, and Python 3.9 or newer for the smoke script.
@@ -117,12 +119,6 @@ Stop if any command fails. The `--no-deps` commands above assume the existing Mo
 
 ## Verification
 
-**Known smoke-check limitation**
-
-The selected-list request in `scripts/smoke.py` includes `status`, but `check_list` currently permits only `session_id`, `started_at`, and `metadata` for that response. The matching fixture in `scripts/tests/test_smoke.py` also expects `status` to be rejected. A valid populated response that includes the requested status therefore fails this check. An empty result does not exercise the row-field mismatch.
-
-This is a static code mismatch, not an observed deployment failure. Align the smoke validator and its fixture before using this selected-field check as an acceptance gate on populated data. Do not bypass the check or delete data to make it pass.
-
 The smoke script makes GET requests only. It checks:
 
 - Root and session-deep-link HTML.
@@ -147,6 +143,7 @@ The sessions-view section above defines how the controls behave. Use these steps
 5. Open the filter panel, apply a status and a boundary filter, and confirm the request carries those parameters and the page shows the live filtered match count.
 6. Set a date and time bound and confirm it is sent as a UTC instant that matches the local time entered. Check that displayed times use the zone named on the page.
 7. Page forward and back, change the rows per page, then refresh and use browser Back to confirm the URL restores the applied parameters and cursor. Do not expect the same records if data changed between reads.
+8. If a soft-deleted session exists, enter its detail URL directly. Confirm the "This session has been deleted." banner shows the deletion time in the named zone, and that the session is absent from the list.
 
 Use `docker compose ps` to confirm only NGINX publishes `0.0.0.0:8080`. API/web health checks are internal process-liveness checks. They do not prove frontend packaging or database readiness. Entry HTML uses `Cache-Control: no-cache` to revalidate references to generated asset hashes after deployment.
 
@@ -165,7 +162,7 @@ No API change is required for supported field paths. The list API always supplie
 | Homepage returns JSON `404` while containers are healthy | Confirm the deployed web image was built with the frontend stage. The image tests must pass without a host `dist/` mount. |
 | HTML loads but a script or stylesheet returns `404` | Rebuild the complete web image and recreate its container. Run smoke checks against the asset URLs in the newly served HTML. |
 | NGINX returns `502` after replacing API/web | Wait for healthy upstreams, then recreate NGINX to refresh its resolved addresses. |
-| Field-selection smoke check fails | Check the known selected-field validator mismatch above first. If the response contains the requested `status`, align the smoke validator and fixture. Otherwise, rebuild and recreate the API image; an older API can ignore `fields` and return its default response. |
+| Field-selection smoke check fails | Rebuild and recreate the API image; an older API can ignore `fields` and return its default response. |
 | Table displays an API/network error | Use the smoke results to separate API/proxy failures from asset serving. Keep response bodies, identities, and credentials out of diagnostic logs. |
 | UI displays no sessions | Check whether the page says no sessions were recorded or no sessions match. Clear filters, and remember that nonblank text, including surrounding spaces, is matched literally. Deployment verification does not create sample data. |
 | UI shows an empty page with a positive match count | The cursor may outlive the records on that page. Select **Return to newest sessions**. |
@@ -173,6 +170,23 @@ No API change is required for supported field paths. The list API always supplie
 | UI reports an invalid list response after an API upgrade | Rebuild and recreate the web image. An older frontend may still expect the retired bare-array response instead of the five-field page envelope. |
 
 The UI does not retry failed reads automatically. Correct the URL or service problem, then reload or navigate again.
+
+## Removing soft-deleted data
+
+The API never removes documents. Permanent removal is an operator task in the `mongo` container, using the root credentials already in its environment. The command authenticates without printing credentials and removes the runs before their sessions, so a failure partway leaves sessions that can be retried rather than orphaned runs:
+
+```bash
+docker compose exec mongo mongosh --quiet --eval '
+  const admin = db.getSiblingDB("admin");
+  admin.auth(process.env.MONGO_INITDB_ROOT_USERNAME, process.env.MONGO_INITDB_ROOT_PASSWORD);
+  const app = db.getSiblingDB(process.env.MONGO_DB_NAME);
+  const ids = app.sessions.find({deleted_at: {$ne: null}}, {_id: 1}).toArray().map((s) => s._id);
+  print("runs removed: " + app.runs.deleteMany({session_id: {$in: ids}}).deletedCount);
+  print("sessions removed: " + app.sessions.deleteMany({_id: {$in: ids}}).deletedCount);
+'
+```
+
+This cannot be undone. Take a backup first if the records may be needed. Do not grant the application user extra privileges for this, and do not use `docker compose down -v`.
 
 ## Rollback
 
@@ -185,4 +199,4 @@ docker compose up -d --no-build --no-deps --force-recreate --wait api web
 docker compose up -d --no-deps --force-recreate --wait nginx
 ```
 
-Use the unique label recorded before rollout. Restore any changed configuration along with its matching images. Retain a separate tag for the failed release before overwriting `latest` if you need a roll-forward reference. This does not revert database contents or delete volumes. If the previous web image lacked the frontend bundle, rollback restores that limitation too; do not call it a passing UI deployment.
+Use the unique label recorded before rollout. Restore any changed configuration along with its matching images. Retain a separate tag for the failed release before overwriting `latest` if you need a roll-forward reference. This does not revert database contents or delete volumes. If the previous web image lacked the frontend bundle, rollback restores that limitation too; do not call it a passing UI deployment. Rolling the API back to a release without soft delete makes soft-deleted sessions appear in lists again, because older releases do not filter on `deleted_at`.

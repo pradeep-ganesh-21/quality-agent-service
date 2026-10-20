@@ -288,6 +288,39 @@ describe('full session details', () => {
     await screen.findByRole('article', { name: `Run ${OTHER_ID}` });
     expect(screen.getAllByRole('article').map((article) => article.getAttribute('aria-label'))).toEqual([`Run ${run.run_id}`, `Run ${OTHER_ID}`]);
   });
+
+  it('shows a deleted banner with the local deletion time for a directly entered URL', async () => {
+    const deletedAt = '2026-10-02T08:00:00.123Z';
+    fetchMock.mockResolvedValue(jsonResponse({
+      ...summary, status: 'COMPLETED', metadata: {}, deleted_at: deletedAt,
+      runs: [{ ...run, deleted_at: deletedAt }],
+    }));
+    render(application(`/sessions/${SESSION_ID}`));
+    const banner = await screen.findByText('This session has been deleted.');
+    const notice = banner.closest('[role="status"]');
+    expect(notice).not.toBeNull();
+    const time = within(notice as HTMLElement).getByText('2026-10-02 13:30:00.123');
+    expect(time.tagName).toBe('TIME');
+    expect(time).toHaveAttribute('dateTime', deletedAt);
+    expect(notice).toHaveTextContent('Deleted at 2026-10-02 13:30:00.123');
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    // The rest of the record still renders for maintainers.
+    expect(screen.getByText('COMPLETED')).toBeInTheDocument();
+    expect(screen.getByRole('article', { name: `Run ${run.run_id}` })).toBeInTheDocument();
+    expect(screen.getByText('Full session JSON', { selector: 'summary' })).toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledExactlyOnceWith(`/v1/sessions/${SESSION_ID}`, expect.objectContaining({ method: 'GET' }));
+  });
+
+  it.each([
+    { label: 'null', deletion: { deleted_at: null } },
+    { label: 'missing', deletion: {} },
+  ])('shows no deleted banner when the deletion time is $label', async ({ deletion }) => {
+    fetchMock.mockResolvedValue(jsonResponse({ ...summary, metadata: {}, ...deletion, runs: [run] }));
+    render(application(`/sessions/${SESSION_ID}`));
+    await screen.findByRole('article', { name: `Run ${run.run_id}` });
+    expect(screen.queryByText('This session has been deleted.')).not.toBeInTheDocument();
+    expect(screen.queryByText(/Deleted at/)).not.toBeInTheDocument();
+  });
 });
 
 describe('request failures and lifecycle', () => {

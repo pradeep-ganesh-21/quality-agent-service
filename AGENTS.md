@@ -40,7 +40,11 @@ Keep the diagram aligned with the approved contract in `DESIGN.md`. Mark specifi
 - Validate every list query parameter in the service before any repository call. Reject unknown and repeated parameters with `invalid_field` instead of ignoring them, and never echo a supplied value.
 - Treat cursors as unsigned continuation values, not credentials. Bind them to the filters and page size, validate them before any database operation, and return an empty terminal page for a stale one.
 - Always project the list sort key to mint cursors, and strip it from records that did not select it.
-- Allow run insertion after a parent becomes terminal. Only session patch is status-guarded.
+- Allow run insertion after a parent becomes terminal. Only session patch is status-guarded. Run creation rejects a soft-deleted parent with `409 session_deleted`.
+- Treat a missing `deleted_at` as `null`. Do not backfill it and do not change `schema_version` for it.
+- Exclude soft-deleted sessions from every list page and `total_count` with a fixed condition. Do not expose `deleted_at` as a list filter or a selectable field. Session detail still returns soft-deleted sessions and includes `deleted_at`.
+- Never overwrite an existing `deleted_at`. Repeat deletes stamp only unstamped runs, using the session's original timestamp.
+- The browser never calls the delete routes. The smoke test stays GET-only.
 - Browser code calls only relative `/v1/sessions` (optionally with repeated `fields` parameters and the DESIGN.md filter and paging parameters) and `/v1/sessions/{session_id}` paths through NGINX. It never uses the Docker hostname `api`, its internal port, `API_BASE_URL`, or `/ui/api/*`.
 - Read list rows from `page.items` and navigate only with response cursors. Keep applied filters, page size, and cursor in the browser URL. Keep unsubmitted filter drafts out of it, and drop the cursor when filters or page size change.
 - Offer browser page sizes `25`, `50`, and `100`, with `25` as the default. Do not narrow the API contract, which accepts `page_size` from 1 through 100.
@@ -50,7 +54,8 @@ Keep the diagram aligned with the approved contract in `DESIGN.md`. Mark specifi
 - Serve the SPA only for `/` and `/sessions/{session_id}`. Unknown routes and missing assets return `404`.
 - NGINX is the only host-published service at `0.0.0.0:8080:80`. Keep HTTP only.
 - Set `client_max_body_size 0`. Do not add an application request size cap.
-- Do not add HTTP authentication, tokens, TLS, CORS as a security claim, queues, Redis, deletes, `PUT`, idempotency, or transactions.
+- Do not add HTTP authentication, tokens, TLS, CORS as a security claim, queues, Redis, `PUT`, idempotency, or transactions.
+- Deletes are soft deletes only. `DELETE /v1/sessions/{session_id}` and `POST /v1/sessions/bulk-delete` set `deleted_at` on the session and its runs as specified in DESIGN.md. Hard deletes are not allowed: never add one to the API, a repository adapter, or any service, and never use `delete_one`, `delete_many`, `drop`, or any other document removal in application code. Hard deletion is an operator-only `mongosh` procedure and is not an application capability.
 - Do not log bodies, credentials, arbitrary extra keys, or raw invalid values.
 - Treat API and web health routes as internal liveness only. Edge `/healthz` remains `404`.
 - Package the React build into the Python web image at `/app/static`. Verify the image without a host asset mount and run the composed UI/asset smoke checks before declaring deployment complete; healthy containers alone are not sufficient.

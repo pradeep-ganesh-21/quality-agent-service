@@ -245,9 +245,29 @@ describe('HTTP and response failures', () => {
     { ...summary, metadata: {}, runs: [{ ...run, verdict: 0 }] },
     { ...summary, metadata: {}, runs: [{ ...run, occurred_at: 'yesterday' }] },
     { ...summary, metadata: {}, runs: [{ ...run, occurred_at: '2026-13-01T00:00:00.000Z' }] },
+    { ...summary, metadata: {}, runs: [], deleted_at: 'yesterday' },
+    { ...summary, metadata: {}, runs: [], deleted_at: '2026-10-02T08:00:00Z' },
+    { ...summary, metadata: {}, runs: [], deleted_at: 0 },
+    { ...summary, metadata: {}, runs: [], deleted_at: {} },
+    { ...summary, metadata: {}, runs: [{ ...run, deleted_at: 'yesterday' }] },
+    { ...summary, metadata: {}, runs: [{ ...run, deleted_at: false }] },
   ])('rejects malformed detail or run fields', async (value) => {
     respond(value);
     expect(await getSession(SESSION_ID)).toMatchObject({ ok: false, error: { kind: 'invalid_response' } });
+  });
+
+  it.each([
+    { label: 'missing', session: {}, runDeletion: {} },
+    { label: 'null', session: { deleted_at: null }, runDeletion: { deleted_at: null } },
+    {
+      label: 'a timestamp',
+      session: { deleted_at: '2026-10-02T08:00:00.123Z' },
+      runDeletion: { deleted_at: '2026-10-02T08:00:00.123Z' },
+    },
+  ])('accepts a $label deletion timestamp on the session and its runs', async ({ session, runDeletion }) => {
+    const detail = { ...summary, metadata: {}, ...session, runs: [{ ...run, ...runDeletion }] };
+    respond(detail);
+    expect(await getSession(SESSION_ID)).toEqual({ ok: true, data: detail });
   });
 });
 

@@ -11,14 +11,18 @@ Start with these documents when changing the project:
 
 ## Current status
 
-The current API implements four session routes:
+The current API implements six session routes:
 
 - `POST /v1/sessions`
 - `PATCH /v1/sessions/{session_id}`
 - `GET /v1/sessions`
 - `GET /v1/sessions/{session_id}`
+- `DELETE /v1/sessions/{session_id}` (soft delete)
+- `POST /v1/sessions/bulk-delete` (soft delete)
 
-The detail route reads existing run records, but `POST /v1/sessions/{session_id}/runs` is still planned. API request-correlation middleware, a Compose test overlay, and guarded real-Mongo coverage for oversized writes and write concern are also planned. The current real-Mongo integration suite covers session list queries. Do not present planned work as implemented.
+The delete routes set `deleted_at` on a session and its runs. Lists hide soft-deleted sessions, and the detail route still returns them. The browser does not call the delete routes.
+
+The detail route reads existing run records, but `POST /v1/sessions/{session_id}/runs` is still planned. API request-correlation middleware, a Compose test overlay, and guarded real-Mongo coverage for oversized writes and write concern are also planned. The current real-Mongo integration suite covers session list queries and soft delete. Do not present planned work as implemented.
 
 Run the checks relevant to your change before reporting it complete, and state which commands actually ran. Health and HTTP smoke checks do not execute React. Report browser behavior as verified only after completing the manual browser checks.
 

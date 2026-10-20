@@ -41,10 +41,13 @@ export type Run = {
   occurred_at: string;
   received_at: string;
   details: JsonObject;
+  // Absent means not deleted, as for records written before soft delete existed.
+  deleted_at?: string | null;
 };
 
 export type SessionDetail = SessionSummary & {
   metadata: JsonObject;
+  deleted_at?: string | null;
   runs: Run[];
 };
 

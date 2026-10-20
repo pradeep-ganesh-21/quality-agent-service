@@ -390,7 +390,10 @@ def test_invalid_request_responses_never_echo_supplied_values(api_client):
 
 @pytest.mark.parametrize(
     ("method", "path"),
-    [("put", PATCH_PATH), ("delete", PATCH_PATH), ("post", PATCH_PATH), ("patch", "/v1/sessions")],
+    [
+        ("put", PATCH_PATH), ("post", PATCH_PATH), ("patch", "/v1/sessions"),
+        ("delete", "/v1/sessions"), ("put", "/v1/sessions/bulk-delete"),
+    ],
 )
 def test_unsupported_write_methods_are_rejected_without_persistence(api_client, method, path):
     client, sessions, _ = api_client

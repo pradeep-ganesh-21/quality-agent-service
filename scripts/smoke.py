@@ -122,13 +122,14 @@ def check_list(value, id_only=False, label=None):
         )
     rows = value["items"]
     require(isinstance(rows, list) and len(rows) <= value["page_size"], label, reason)
-    allowed = {"session_id"} if id_only else {"session_id", "started_at", "metadata"}
+    allowed = {"session_id"} if id_only else {"session_id", "started_at", "status", "metadata"}
     for row in rows:
         require(
             isinstance(row, dict)
             and set(row) <= allowed
             and valid_id(row.get("session_id"))
             and ("started_at" not in row or valid_timestamp(row["started_at"]))
+            and ("status" not in row or row["status"] in ("IN_PROGRESS", "COMPLETED", "FAILED"))
             and ("metadata" not in row or isinstance(row["metadata"], dict)),
             label, reason,
         )
@@ -138,7 +139,8 @@ def check_list(value, id_only=False, label=None):
 def check_detail(value, session_id):
     fields = {
         "session_id", "schema_version", "started_at", "received_at", "status",
-        "completion_time", "last_step_executed", "execution_outcome", "metadata", "runs",
+        "completion_time", "last_step_executed", "execution_outcome", "metadata", "deleted_at",
+        "runs",
     }
     reason = "deploy the full-detail API; expected all session roots, metadata object, and runs array."
     require(
@@ -154,12 +156,13 @@ def check_detail(value, session_id):
         and all(isinstance(step, str) for step in value["last_step_executed"])
         and (value["execution_outcome"] is None or isinstance(value["execution_outcome"], dict))
         and isinstance(value["metadata"], dict)
+        and (value["deleted_at"] is None or valid_timestamp(value["deleted_at"]))
         and isinstance(value["runs"], list),
         "Session detail", reason,
     )
     run_fields = {
         "run_id", "session_id", "schema_version", "step", "command", "verdict",
-        "occurred_at", "received_at", "details",
+        "occurred_at", "received_at", "details", "deleted_at",
     }
     for run in value["runs"]:
         require(
@@ -172,7 +175,8 @@ def check_detail(value, session_id):
                     for key in ("step", "command", "verdict"))
             and valid_timestamp(run["occurred_at"])
             and valid_timestamp(run["received_at"])
-            and isinstance(run["details"], dict),
+            and isinstance(run["details"], dict)
+            and (run["deleted_at"] is None or valid_timestamp(run["deleted_at"])),
             "Session detail", "deploy the full-detail API; expected complete run objects with details objects.",
         )
 

@@ -40,6 +40,14 @@ export function SessionDetail() {
 function SessionRecord({ session }: { session: SessionDetailRecord }) {
   return (
     <div className="record">
+      {session.deleted_at != null && (
+        <div className="notice notice-deleted" role="status">
+          <p className="notice-title">This session has been deleted.</p>
+          <p className="notice-detail">
+            Deleted at <time dateTime={session.deleted_at}>{formatTimestamp(session.deleted_at)}</time>
+          </p>
+        </div>
+      )}
       <section className="record-section" aria-labelledby="summary-heading">
         <div className="section-heading">
           <h2 id="summary-heading">Session</h2>

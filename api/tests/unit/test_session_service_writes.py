@@ -34,7 +34,7 @@ ARBITRARY_EXTRAS = {
 }
 SESSION_ROOT_FIELDS = frozenset({
     "schema_version", "started_at", "received_at", "status",
-    "completion_time", "last_step_executed", "execution_outcome", "metadata",
+    "completion_time", "last_step_executed", "execution_outcome", "metadata", "deleted_at",
 })
 
 
@@ -115,6 +115,7 @@ def test_minimal_create_builds_the_exact_stored_envelope(writes):
         "last_step_executed": [],
         "execution_outcome": None,
         "metadata": {},
+        "deleted_at": None,
     }
     assert type(document["schema_version"]) is int
     assert isinstance(document["started_at"], datetime)
@@ -187,10 +188,10 @@ def test_create_rejects_each_reserved_field_before_model_validation(writes, fiel
 def test_create_reserved_field_list_matches_the_documented_names():
     assert SESSION_CREATE_RESERVED_FIELDS == frozenset({
         "_id", "session_id", "received_at", "schema_version",
-        "status", "completion_time", "last_step_executed", "execution_outcome",
+        "status", "completion_time", "last_step_executed", "execution_outcome", "deleted_at",
     })
     assert SESSION_PATCH_RESERVED_FIELDS == frozenset({
-        "_id", "session_id", "received_at", "schema_version", "started_at",
+        "_id", "session_id", "received_at", "schema_version", "started_at", "deleted_at",
     })
     assert SESSION_PATCH_CONSUMED_FIELDS == frozenset({
         "status", "completion_time", "last_step_executed", "execution_outcome",

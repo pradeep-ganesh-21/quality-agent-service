@@ -61,6 +61,8 @@ dd { margin: 0; overflow-wrap: anywhere; }
 .json-block pre { margin: 0; padding: 1rem; max-width: 100%; overflow: auto; font-size: 0.8rem; line-height: 1.65; tab-size: 2; }
 .notice { background: var(--surface); border: 1px solid var(--rule); border-radius: 0.4rem; padding: 1.5rem; }
 .notice-error { border-left: 4px solid #a72e35; }
+.notice-deleted { border-left: 4px solid #b26a00; background: #fff8eb; }
+.notice-title { font-weight: 600; margin: 0; }
 .notice-detail { color: var(--muted); font-size: 0.8rem; margin: 0.3rem 0 0; }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
 .skip-link { position: absolute; top: -10rem; left: 1rem; background: var(--surface); padding: 0.5rem 1rem; z-index: 1; }

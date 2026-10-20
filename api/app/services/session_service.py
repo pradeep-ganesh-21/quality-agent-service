@@ -1,14 +1,19 @@
 from collections.abc import Sequence
 from copy import deepcopy
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Literal, TypeAlias
 
 from pydantic import ValidationError
 
 from app.domain import SessionStatus
 from app.errors import ApplicationError, ErrorCode
 from app.repositories.protocols import RunRepository, SessionRecord, SessionRepository
-from app.schemas.sessions import SessionCreateRequest, SessionPatchRequest
+from app.schemas.sessions import (
+    SessionBulkDeleteRequest,
+    SessionCreateRequest,
+    SessionPatchRequest,
+)
 from app.services.mapping import (
     SESSION_CREATE_CONSUMED_FIELDS,
     SESSION_CREATE_RESERVED_FIELDS,
@@ -23,6 +28,15 @@ from app.services.session_listing import (
     build_session_list_result,
     parse_session_list_request,
 )
+
+DeleteOutcome: TypeAlias = Literal["deleted", "already_deleted", "not_found"]
+
+
+@dataclass(slots=True)
+class BulkDeleteResult:
+    deleted: list[str] = field(default_factory=list)
+    already_deleted: list[str] = field(default_factory=list)
+    not_found: list[str] = field(default_factory=list)
 
 
 class SessionService:
@@ -73,6 +87,7 @@ class SessionService:
             "last_step_executed": [],
             "execution_outcome": None,
             "metadata": metadata,
+            "deleted_at": None,
         }
         validate_document_depth(document)
         # Validate depth before a recursive copy; deeply nested input is rejected.
@@ -109,3 +124,50 @@ class SessionService:
         return await self._repository.patch_open_session(
             session_id, known, deepcopy(extras)
         )
+
+    async def delete_session(self, session_id: str) -> None:
+        outcome = await self._soft_delete(session_id, _deletion_time())
+        if outcome == "not_found":
+            raise ApplicationError(ErrorCode.SESSION_NOT_FOUND)
+        if outcome == "already_deleted":
+            raise ApplicationError(ErrorCode.SESSION_DELETED)
+
+    async def delete_sessions(self, body: dict[str, Any]) -> BulkDeleteResult:
+        validate_json_values(body)
+        try:
+            request = SessionBulkDeleteRequest.model_validate(body)
+        except ValidationError as error:
+            first_issue = error.errors(include_input=False, include_context=False)[0]
+            code = (
+                ErrorCode.MISSING_FIELD
+                if first_issue["type"] == "missing"
+                else ErrorCode.INVALID_FIELD
+            )
+            raise ApplicationError(code) from None
+
+        deleted_at = _deletion_time()
+        result = BulkDeleteResult()
+        # Duplicates collapse to their first occurrence; IDs are processed in order.
+        for session_id in dict.fromkeys(request.session_ids):
+            outcome = await self._soft_delete(session_id, deleted_at)
+            getattr(result, outcome).append(session_id)
+        return result
+
+    async def _soft_delete(self, session_id: str, deleted_at: datetime) -> DeleteOutcome:
+        # The session is stamped before its runs without a transaction. A failure
+        # between the two leaves unstamped runs that a repeated delete stamps.
+        if await self._repository.soft_delete(session_id, deleted_at):
+            await self._runs.soft_delete_for_session(session_id, deleted_at)
+            return "deleted"
+        state = await self._repository.state(session_id)
+        if state is None:
+            return "not_found"
+        if state.deleted_at is None:
+            # The guarded update found no live session, yet the lookup did.
+            raise ApplicationError(ErrorCode.INTERNAL_ERROR)
+        await self._runs.soft_delete_for_session(session_id, state.deleted_at)
+        return "already_deleted"
+
+
+def _deletion_time() -> datetime:
+    return utc_milliseconds(datetime.now(timezone.utc))

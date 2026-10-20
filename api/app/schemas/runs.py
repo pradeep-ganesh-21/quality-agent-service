@@ -18,7 +18,12 @@ class RunResponse(BaseModel):
     occurred_at: AwareDatetime
     received_at: AwareDatetime
     details: dict[str, Any]
+    deleted_at: AwareDatetime | None
 
     @field_serializer("occurred_at", "received_at", when_used="json")
     def serialize_timestamp(self, value: datetime) -> str:
         return format_timestamp(value)
+
+    @field_serializer("deleted_at", when_used="json")
+    def serialize_deleted_at(self, value: datetime | None) -> str | None:
+        return None if value is None else format_timestamp(value)

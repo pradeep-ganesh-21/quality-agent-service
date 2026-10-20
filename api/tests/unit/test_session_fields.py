@@ -76,7 +76,7 @@ def test_collapse_uses_components_not_textual_prefixes():
 @pytest.mark.parametrize(
     "fields",
     [
-        [], [""], [" "], ["_id"], ["runs"], ["runs.step"], ["boundary"],
+        [], [""], [" "], ["_id"], ["runs"], ["runs.step"], ["boundary"], ["deleted_at"],
         ["session_id.name"], ["started_at.year"], ["last_step_executed.name"],
         ["metadata."], [".metadata"], ["metadata..name"], ["metadata.\x00name"],
         ["metadata.\ud800"], ["$where"], ["metadata.$where"], ["metadata.a.$"],
@@ -94,7 +94,7 @@ def test_invalid_selection_is_rejected_by_normalization(fields):
 @pytest.mark.parametrize(
     "fields",
     [
-        [""], ["runs"], ["metadata.$where"], ["status,started_at"],
+        [""], ["runs"], ["deleted_at"], ["metadata.$where"], ["status,started_at"],
         ["metadata", "metadata.$where"], [None],
     ],
 )

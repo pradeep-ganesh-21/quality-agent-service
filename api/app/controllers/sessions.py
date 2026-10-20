@@ -1,12 +1,13 @@
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, Request, status
+from fastapi import APIRouter, Depends, Request, Response, status
 from pydantic import ValidationError
 
 from app.dependencies import get_session_service
 from app.errors import ApplicationError, ErrorCode
 from app.repositories.protocols import SessionRecord
 from app.schemas.sessions import (
+    SessionBulkDeleteResponse,
     SessionDetailResponse,
     SessionIdResponse,
     SessionListResponse,
@@ -72,6 +73,20 @@ async def create_session(
     return SessionIdResponse(session_id=session_id)
 
 
+@router.post("/bulk-delete", response_model=SessionBulkDeleteResponse)
+async def bulk_delete_sessions(
+    request: Request,
+    service: Annotated[SessionService, Depends(get_session_service)],
+) -> SessionBulkDeleteResponse:
+    body = await _read_json_body(request)
+    result = await service.delete_sessions(body)
+    return SessionBulkDeleteResponse(
+        deleted=result.deleted,
+        already_deleted=result.already_deleted,
+        not_found=result.not_found,
+    )
+
+
 @router.patch("/{session_id}", response_model=SessionIdResponse)
 async def patch_session(
     session_id: str,
@@ -81,3 +96,12 @@ async def patch_session(
     body = await _read_json_body(request)
     updated_id = await service.patch_session(session_id, body)
     return SessionIdResponse(session_id=updated_id)
+
+
+@router.delete("/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_session(
+    session_id: str,
+    service: Annotated[SessionService, Depends(get_session_service)],
+) -> Response:
+    await service.delete_session(session_id)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)

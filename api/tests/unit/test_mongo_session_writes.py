@@ -16,10 +16,12 @@ from pymongo.errors import ConnectionFailure, DocumentTooLarge, OperationFailure
 
 from app.errors import ApplicationError, ErrorCode
 from app.repositories.mongo_session_repository import MongoSessionRepository
+from app.repositories.protocols import SessionState
 
 SESSION_ID = "68df8b00aef4d8537282f001"
 STARTED_AT = datetime(2026, 10, 1, 9, 7, 4, 123000, tzinfo=timezone.utc)
 RECEIVED_AT = datetime(2026, 10, 1, 9, 7, 5, 456000, tzinfo=timezone.utc)
+DELETED_AT = datetime(2026, 10, 2, 8, 0, 0, 123000, tzinfo=timezone.utc)
 DOCUMENT = {
     "schema_version": 1,
     "started_at": STARTED_AT,
@@ -129,7 +131,9 @@ def test_patch_issues_one_guarded_pipeline_update_without_upsert(repository):
 
     collection.update_one.assert_awaited_once()
     filter_spec, pipeline = collection.update_one.await_args.args
-    assert filter_spec == {"_id": ObjectId(SESSION_ID), "status": "IN_PROGRESS"}
+    assert filter_spec == {
+        "_id": ObjectId(SESSION_ID), "status": "IN_PROGRESS", "deleted_at": None,
+    }
     assert collection.update_one.await_args.kwargs == {"upsert": False}
     assert len(pipeline) == 1
     set_spec = pipeline[0]["$set"]
@@ -187,7 +191,9 @@ def test_unmatched_update_uses_one_id_only_lookup_to_report_a_missing_session(re
         ErrorCode.SESSION_NOT_FOUND,
         lambda: asyncio.run(repo.patch_open_session(SESSION_ID, {"status": "FAILED"}, {})),
     )
-    collection.find_one.assert_awaited_once_with({"_id": ObjectId(SESSION_ID)}, {"_id": 1})
+    collection.find_one.assert_awaited_once_with(
+        {"_id": ObjectId(SESSION_ID)}, {"_id": 1, "deleted_at": 1}
+    )
     collection.update_one.assert_awaited_once()
 
 
@@ -200,6 +206,103 @@ def test_unmatched_update_on_an_existing_session_reports_a_terminal_conflict(rep
         lambda: asyncio.run(repo.patch_open_session(SESSION_ID, {}, {})),
     )
     collection.find_one.assert_awaited_once()
+
+
+@pytest.mark.parametrize("deleted_at", [None, "missing"])
+def test_unmatched_update_on_a_live_session_is_not_reported_as_deleted(repository, deleted_at):
+    repo, collection, _ = repository
+    collection.update_one.return_value = MagicMock(matched_count=0, modified_count=0)
+    stored = {"_id": ObjectId(SESSION_ID)}
+    if deleted_at is None:
+        stored["deleted_at"] = None
+    collection.find_one.return_value = stored
+    expect_error(
+        ErrorCode.SESSION_NOT_OPEN,
+        lambda: asyncio.run(repo.patch_open_session(SESSION_ID, {}, {})),
+    )
+
+
+def test_unmatched_update_on_a_soft_deleted_session_reports_deletion(repository):
+    repo, collection, _ = repository
+    collection.update_one.return_value = MagicMock(matched_count=0, modified_count=0)
+    collection.find_one.return_value = {"_id": ObjectId(SESSION_ID), "deleted_at": DELETED_AT}
+    expect_error(
+        ErrorCode.SESSION_DELETED,
+        lambda: asyncio.run(repo.patch_open_session(SESSION_ID, {}, {})),
+    )
+    collection.find_one.assert_awaited_once()
+
+
+def test_soft_delete_sets_the_timestamp_only_on_a_live_session(repository):
+    repo, collection, _ = repository
+    assert asyncio.run(repo.soft_delete(SESSION_ID.upper(), DELETED_AT)) is True
+    collection.update_one.assert_awaited_once_with(
+        {"_id": ObjectId(SESSION_ID), "deleted_at": None},
+        {"$set": {"deleted_at": DELETED_AT}},
+        upsert=False,
+    )
+    collection.find_one.assert_not_awaited()
+    # Soft delete never removes a document.
+    assert collection.delete_one.mock_calls == []
+    assert collection.delete_many.mock_calls == []
+
+
+def test_soft_delete_success_is_decided_by_matched_count(repository):
+    repo, collection, _ = repository
+    collection.update_one.return_value = MagicMock(matched_count=1, modified_count=0)
+    assert asyncio.run(repo.soft_delete(SESSION_ID, DELETED_AT)) is True
+    collection.update_one.return_value = MagicMock(matched_count=0, modified_count=0)
+    assert asyncio.run(repo.soft_delete(SESSION_ID, DELETED_AT)) is False
+
+
+@pytest.mark.parametrize(
+    "session_id",
+    ["", "not-an-object-id", SESSION_ID + "00", None, 1, ObjectId(SESSION_ID), bytes.fromhex(SESSION_ID)],
+)
+def test_soft_delete_and_state_with_malformed_identifiers_touch_no_document(
+    repository, session_id
+):
+    repo, collection, _ = repository
+    assert asyncio.run(repo.soft_delete(session_id, DELETED_AT)) is False
+    assert asyncio.run(repo.state(session_id)) is None
+    collection.update_one.assert_not_awaited()
+    collection.find_one.assert_not_awaited()
+
+
+def test_soft_delete_failures_are_sanitized(repository):
+    repo, collection, _ = repository
+    collection.update_one.side_effect = ConnectionFailure("sensitive connection details")
+    error = expect_error(
+        ErrorCode.INTERNAL_ERROR, lambda: asyncio.run(repo.soft_delete(SESSION_ID, DELETED_AT))
+    )
+    assert error.__cause__ is None and error.__suppress_context__
+
+
+@pytest.mark.parametrize(
+    ("stored", "expected"),
+    [
+        (None, None),
+        ({"_id": ObjectId(SESSION_ID)}, SessionState(deleted_at=None)),
+        ({"_id": ObjectId(SESSION_ID), "deleted_at": None}, SessionState(deleted_at=None)),
+        (
+            {"_id": ObjectId(SESSION_ID), "deleted_at": DELETED_AT},
+            SessionState(deleted_at=DELETED_AT),
+        ),
+    ],
+)
+def test_state_reads_only_the_identifier_and_deletion_timestamp(repository, stored, expected):
+    repo, collection, _ = repository
+    collection.find_one.return_value = stored
+    assert asyncio.run(repo.state(SESSION_ID)) == expected
+    collection.find_one.assert_awaited_once_with(
+        {"_id": ObjectId(SESSION_ID)}, {"_id": 1, "deleted_at": 1}
+    )
+
+
+def test_state_rejects_a_corrupt_deletion_timestamp(repository):
+    repo, collection, _ = repository
+    collection.find_one.return_value = {"_id": ObjectId(SESSION_ID), "deleted_at": "yesterday"}
+    expect_error(ErrorCode.INTERNAL_ERROR, lambda: asyncio.run(repo.state(SESSION_ID)))
 
 
 @pytest.mark.parametrize(

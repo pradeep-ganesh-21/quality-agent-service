@@ -222,12 +222,12 @@ def test_detail_remains_complete_after_selected_list_read(api_client):
     ]
 
     metadata = {"invoked_by": {"name": "Operator", "email": "operator@example.invalid"}}
-    sessions.get.return_value = {**summary_record(), "metadata": metadata}
+    sessions.get.return_value = {**summary_record(), "metadata": metadata, "deleted_at": None}
     run = {
         "run_id": RUN_ID, "session_id": SESSION_ID, "schema_version": 1,
         "step": "pair-actions", "command": "pair", "verdict": "NEW_VERDICT",
         "occurred_at": TIMESTAMP, "received_at": TIMESTAMP,
-        "details": {"a.b": {"$set": "$status"}},
+        "details": {"a.b": {"$set": "$status"}}, "deleted_at": None,
     }
     runs.list_for_session.return_value = [run]
     response = client.get(f"/v1/sessions/{SESSION_ID.upper()}")
@@ -236,6 +236,7 @@ def test_detail_remains_complete_after_selected_list_read(api_client):
         **summary_record(),
         "started_at": SERIALIZED_TIMESTAMP, "received_at": SERIALIZED_TIMESTAMP,
         "metadata": metadata,
+        "deleted_at": None,
         "runs": [{**run, "occurred_at": SERIALIZED_TIMESTAMP, "received_at": SERIALIZED_TIMESTAMP}],
     }
     sessions.get.assert_awaited_once_with(SESSION_ID.upper())
@@ -244,10 +245,52 @@ def test_detail_remains_complete_after_selected_list_read(api_client):
 
 def test_detail_with_no_runs_keeps_empty_list(api_client):
     client, sessions, _ = api_client
-    sessions.get.return_value = {**summary_record(), "metadata": {}}
+    sessions.get.return_value = {**summary_record(), "metadata": {}, "deleted_at": None}
     response = client.get(f"/v1/sessions/{SESSION_ID}")
     assert response.status_code == 200
     assert response.json()["runs"] == []
+
+
+def test_detail_returns_a_soft_deleted_session_with_deletion_timestamps(api_client):
+    client, sessions, runs = api_client
+    sessions.get.return_value = {
+        **summary_record(), "status": "COMPLETED", "metadata": {}, "deleted_at": TIMESTAMP,
+    }
+    run = {
+        "run_id": RUN_ID, "session_id": SESSION_ID, "schema_version": 1,
+        "step": "pair-actions", "command": "pair", "verdict": "PASS",
+        "occurred_at": TIMESTAMP, "received_at": TIMESTAMP, "details": {},
+    }
+    # A run inserted during the accepted race is returned unstamped with its parent.
+    runs.list_for_session.return_value = [
+        {**run, "deleted_at": TIMESTAMP}, {**run, "run_id": SESSION_ID, "deleted_at": None},
+    ]
+    response = client.get(f"/v1/sessions/{SESSION_ID}")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "COMPLETED"
+    assert body["deleted_at"] == SERIALIZED_TIMESTAMP
+    assert [item["deleted_at"] for item in body["runs"]] == [SERIALIZED_TIMESTAMP, None]
+
+
+@pytest.mark.parametrize("target", ["session", "run"])
+def test_detail_requires_the_deletion_timestamp_from_the_repository(api_client, target):
+    client, sessions, runs = api_client
+    run = {
+        "run_id": RUN_ID, "session_id": SESSION_ID, "schema_version": 1,
+        "step": "pair-actions", "command": "pair", "verdict": "PASS",
+        "occurred_at": TIMESTAMP, "received_at": TIMESTAMP, "details": {}, "deleted_at": None,
+    }
+    session = {**summary_record(), "metadata": {}, "deleted_at": None}
+    if target == "session":
+        del session["deleted_at"]
+    else:
+        del run["deleted_at"]
+    sessions.get.return_value = session
+    runs.list_for_session.return_value = [run]
+    response = client.get(f"/v1/sessions/{SESSION_ID}")
+    assert response.status_code == 500
+    assert response.json() == INTERNAL_ERROR
 
 
 def test_missing_detail_does_not_read_runs(api_client):

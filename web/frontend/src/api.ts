@@ -209,6 +209,11 @@ function sessionPage<T extends JsonValue>(
 const acceptsSummaryPage = sessionPage(isSessionSummary);
 const acceptsProjectedPage = sessionPage(isProjectedSession);
 
+function isDeletionTime(value: JsonObject): boolean {
+  // A missing timestamp means not deleted; a present one must be null or valid.
+  return !Object.hasOwn(value, 'deleted_at') || value.deleted_at === null || isTimestamp(value.deleted_at);
+}
+
 function isRun(value: JsonValue): value is Run {
   return isObject(value)
     && isId(value.run_id)
@@ -219,12 +224,14 @@ function isRun(value: JsonValue): value is Run {
     && typeof value.verdict === 'string'
     && isTimestamp(value.occurred_at)
     && isTimestamp(value.received_at)
-    && isObject(value.details);
+    && isObject(value.details)
+    && isDeletionTime(value);
 }
 
 function isSessionDetail(value: JsonValue): value is SessionDetail {
   return isObject(value)
     && isObject(value.metadata)
+    && isDeletionTime(value)
     && Array.isArray(value.runs)
     && value.runs.every(isRun)
     && isSessionSummary(value);

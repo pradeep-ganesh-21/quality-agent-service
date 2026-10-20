@@ -25,6 +25,8 @@ DEFAULT_PROJECTION = {
     "_id": 1, "schema_version": 1, "started_at": 1, "received_at": 1,
     "status": 1, "completion_time": 1, "last_step_executed": 1, "execution_outcome": 1,
 }
+# Every list read excludes soft-deleted sessions.
+LIVE = {"deleted_at": None}
 DESCENDING = [("started_at", -1), ("_id", -1)]
 ASCENDING = [("started_at", 1), ("_id", 1)]
 
@@ -73,8 +75,8 @@ def test_first_page_reads_one_extra_record_in_newest_first_order(repository, fie
     repo, collection, cursor = repository
     page = asyncio.run(repo.list_page(query(fields=fields)))
     assert (page.items, page.total_count) == ([], 0)
-    collection.count_documents.assert_awaited_once_with({})
-    collection.find.assert_called_once_with({}, projection)
+    collection.count_documents.assert_awaited_once_with(LIVE)
+    collection.find.assert_called_once_with(LIVE, projection)
     cursor.sort.assert_called_once_with(DESCENDING)
     cursor.to_list.assert_awaited_once_with(length=26)
     cursor.__aexit__.assert_awaited_once()
@@ -127,22 +129,22 @@ def test_forward_cursor_excludes_the_boundary_and_probes_for_newer_records(repos
     position = PagePosition(started_at=LATER, session_id=SESSION_ID, direction="next")
     page = asyncio.run(repo.list_page(query(fields=("session_id",), position=position)))
 
-    expected_spec = {"$or": [
+    expected_spec = {"$and": [LIVE, {"$or": [
         {"started_at": {"$lt": LATER}},
         {"started_at": LATER, "_id": {"$lt": ObjectId(SESSION_ID)}},
-    ]}
+    ]}]}
     collection.find.assert_called_once_with(expected_spec, {"_id": 1, "started_at": 1})
     cursor.sort.assert_called_once_with(DESCENDING)
     # The anchored record may have changed, so reachability is queried, not assumed.
     collection.find_one.assert_awaited_once_with(
-        {"$or": [
+        {"$and": [LIVE, {"$or": [
             {"started_at": {"$gt": TIMESTAMP}},
             {"started_at": TIMESTAMP, "_id": {"$gt": ObjectId(OTHER_ID)}},
-        ]},
+        ]}]},
         {"_id": 1},
     )
     assert (page.has_newer, page.has_older) == (False, False)
-    assert collection.count_documents.await_args_list == [call({})]
+    assert collection.count_documents.await_args_list == [call(LIVE)]
 
 
 def test_backward_cursor_reads_ascending_and_restores_newest_first_order(repository):
@@ -155,10 +157,10 @@ def test_backward_cursor_reads_ascending_and_restores_newest_first_order(reposit
     page = asyncio.run(repo.list_page(query(fields=("session_id",), page_size=2, position=position)))
 
     collection.find.assert_called_once_with(
-        {"$or": [
+        {"$and": [LIVE, {"$or": [
             {"started_at": {"$gt": TIMESTAMP}},
             {"started_at": TIMESTAMP, "_id": {"$gt": ObjectId(SESSION_ID)}},
-        ]},
+        ]}]},
         {"_id": 1, "started_at": 1},
     )
     cursor.sort.assert_called_once_with(ASCENDING)
@@ -168,10 +170,10 @@ def test_backward_cursor_reads_ascending_and_restores_newest_first_order(reposit
     assert page.newest.session_id == f"{2:024x}"
     assert page.oldest.session_id == f"{1:024x}"
     collection.find_one.assert_awaited_once_with(
-        {"$or": [
+        {"$and": [LIVE, {"$or": [
             {"started_at": {"$lt": TIMESTAMP + timedelta(minutes=1)}},
             {"started_at": TIMESTAMP + timedelta(minutes=1), "_id": {"$lt": ObjectId(f"{1:024x}")}},
-        ]},
+        ]}]},
         {"_id": 1},
     )
 
@@ -216,8 +218,8 @@ def test_stale_cursor_returns_an_empty_terminal_page_with_the_live_total(reposit
 def test_each_filter_builds_its_documented_predicate(repository, filters, expected):
     repo, collection, _ = repository
     asyncio.run(repo.list_page(query(fields=("session_id",), filters=filters)))
-    collection.find.assert_called_once_with(expected, {"_id": 1, "started_at": 1})
-    collection.count_documents.assert_awaited_once_with(expected)
+    collection.find.assert_called_once_with({**LIVE, **expected}, {"_id": 1, "started_at": 1})
+    collection.count_documents.assert_awaited_once_with({**LIVE, **expected})
 
 
 def test_filters_combine_conjunctively(repository):
@@ -231,6 +233,7 @@ def test_filters_combine_conjunctively(repository):
     )
     asyncio.run(repo.list_page(query(fields=("session_id",), filters=filters)))
     assert collection.find.call_args.args[0] == {
+        **LIVE,
         "status": "FAILED",
         "started_at": {"$gte": TIMESTAMP, "$lt": LATER},
         "metadata.boundary": {
@@ -250,7 +253,7 @@ def test_filters_and_boundary_are_conjoined_without_overwriting_the_range(reposi
     position = PagePosition(started_at=LATER, session_id=OTHER_ID, direction="next")
     asyncio.run(repo.list_page(query(fields=("session_id",), filters=filters, position=position)))
 
-    filter_spec = {"status": "COMPLETED", "started_at": {"$gte": TIMESTAMP, "$lt": LATER}}
+    filter_spec = {**LIVE, "status": "COMPLETED", "started_at": {"$gte": TIMESTAMP, "$lt": LATER}}
     assert collection.find.call_args.args[0] == {"$and": [
         filter_spec,
         {"$or": [
@@ -297,12 +300,13 @@ def test_selected_reads_do_not_mutate_default_or_full_detail_projection(reposito
 
     asyncio.run(exercise())
     assert collection.find.call_args_list == [
-        call({}, {"_id": 1, "started_at": 1, "metadata.invoked_by.name": 1}),
-        call({}, DEFAULT_PROJECTION),
-        call({}, {"_id": 1, "started_at": 1}),
+        call(LIVE, {"_id": 1, "started_at": 1, "metadata.invoked_by.name": 1}),
+        call(LIVE, DEFAULT_PROJECTION),
+        call(LIVE, {"_id": 1, "started_at": 1}),
     ]
+    # Detail never filters on deletion state.
     collection.find_one.assert_awaited_once_with(
-        {"_id": ObjectId(SESSION_ID)}, {**DEFAULT_PROJECTION, "metadata": 1},
+        {"_id": ObjectId(SESSION_ID)}, {**DEFAULT_PROJECTION, "metadata": 1, "deleted_at": 1},
     )
 
 
@@ -355,10 +359,19 @@ def test_detail_still_maps_the_complete_record(repository):
     stored = {"_id": ObjectId(SESSION_ID), "started_at": TIMESTAMP, "metadata": {"all": "values"}}
     snapshot = deepcopy(stored)
     collection.find_one.return_value = stored
+    # A document written before soft delete existed reads as not deleted.
     assert asyncio.run(repo.get(SESSION_ID.upper())) == {
         "session_id": SESSION_ID, "started_at": TIMESTAMP, "metadata": {"all": "values"},
+        "deleted_at": None,
     }
     assert stored == snapshot
+
+
+def test_detail_returns_a_soft_deleted_session_with_its_timestamp(repository):
+    repo, collection, _ = repository
+    collection.find_one.return_value = {"_id": ObjectId(SESSION_ID), "deleted_at": LATER}
+    assert asyncio.run(repo.get(SESSION_ID)) == {"session_id": SESSION_ID, "deleted_at": LATER}
+    assert collection.find_one.await_args.args[0] == {"_id": ObjectId(SESSION_ID)}
 
 
 @pytest.mark.parametrize(

@@ -21,6 +21,7 @@ from app.repositories.protocols import (
     SessionListQuery,
     SessionPage,
     SessionRecord,
+    SessionState,
 )
 
 _SESSION_DETAIL_PROJECTION = {
@@ -33,16 +34,21 @@ _SESSION_DETAIL_PROJECTION = {
     "last_step_executed": 1,
     "execution_outcome": 1,
     "metadata": 1,
+    "deleted_at": 1,
 }
 # The list sort key is always read so cursors can be minted, and is projected
 # separately from the caller's selected fields.
 _LIST_ANCHOR_PROJECTION = {"_id": 1, "started_at": 1}
 _NOT_AN_ARRAY = {"$not": {"$type": "array"}}
+# Null equality matches both a stored null and a missing field, so documents
+# written before soft delete existed count as live.
+_NOT_DELETED = {"deleted_at": None}
 
 
 def _session_record(document: dict[str, Any]) -> SessionRecord:
     record = dict(document)
     record["session_id"] = str(record.pop("_id"))
+    record.setdefault("deleted_at", None)
     return record
 
 
@@ -68,8 +74,9 @@ def _filter_spec(filters: SessionFilters) -> dict[str, Any]:
     Server-owned root fields hold known scalar types. Metadata filters are
     applied to arbitrary stored JSON, so they additionally require a non-array
     value: an ordinary field predicate would otherwise match array elements.
+    Soft-deleted sessions are always excluded.
     """
-    spec: dict[str, Any] = {}
+    spec: dict[str, Any] = dict(_NOT_DELETED)
     if filters.status is not None:
         spec["status"] = filters.status
     started_at: dict[str, Any] = {}
@@ -116,8 +123,6 @@ def _read_spec(
     if position is None:
         return dict(filter_spec)
     position_spec = _position_spec(position)
-    if not filter_spec:
-        return position_spec
     # $and keeps a started_at range filter from colliding with the boundary.
     return {"$and": [dict(filter_spec), position_spec]}
 
@@ -149,6 +154,21 @@ class MongoSessionRepository:
         with _translate_mongo_errors():
             result = await self._collection.insert_one(document)
         return str(result.inserted_id)
+
+    async def state(self, session_id: str) -> SessionState | None:
+        object_id = parse_object_id(session_id)
+        if object_id is None:
+            return None
+        with translate_read_errors():
+            document = await self._collection.find_one(
+                {"_id": object_id}, {"_id": 1, "deleted_at": 1}
+            )
+        if document is None:
+            return None
+        deleted_at = document.get("deleted_at")
+        if deleted_at is not None and not isinstance(deleted_at, datetime):
+            raise ApplicationError(ErrorCode.INTERNAL_ERROR)
+        return SessionState(deleted_at=deleted_at)
 
     async def get(self, session_id: str) -> SessionRecord | None:
         object_id = parse_object_id(session_id)
@@ -247,13 +267,35 @@ class MongoSessionRepository:
         }
         with _translate_mongo_errors():
             result = await self._collection.update_one(
-                {"_id": object_id, "status": SessionStatus.IN_PROGRESS.value},
+                {
+                    "_id": object_id,
+                    "status": SessionStatus.IN_PROGRESS.value,
+                    **_NOT_DELETED,
+                },
                 [{"$set": set_spec}],
                 upsert=False,
             )
             if result.matched_count == 1:
                 return str(object_id)
-            existing = await self._collection.find_one({"_id": object_id}, {"_id": 1})
+            existing = await self._collection.find_one(
+                {"_id": object_id}, {"_id": 1, "deleted_at": 1}
+            )
             if existing is None:
                 raise ApplicationError(ErrorCode.SESSION_NOT_FOUND)
+            if existing.get("deleted_at") is not None:
+                raise ApplicationError(ErrorCode.SESSION_DELETED)
             raise ApplicationError(ErrorCode.SESSION_NOT_OPEN)
+
+    async def soft_delete(self, session_id: str, deleted_at: datetime) -> bool:
+        object_id = parse_object_id(session_id)
+        if object_id is None:
+            return False
+        # The guard never overwrites an existing deletion timestamp. Success is
+        # decided by matched_count, as for patch.
+        with _translate_mongo_errors():
+            result = await self._collection.update_one(
+                {"_id": object_id, **_NOT_DELETED},
+                {"$set": {"deleted_at": deleted_at}},
+                upsert=False,
+            )
+        return result.matched_count == 1

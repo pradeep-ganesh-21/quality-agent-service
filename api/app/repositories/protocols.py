@@ -64,8 +64,17 @@ class SessionPage:
     has_older: bool = False
 
 
+@dataclass(frozen=True, slots=True)
+class SessionState:
+    """Soft-delete state of an existing session; `deleted_at` is None while live."""
+
+    deleted_at: datetime | None
+
+
 class SessionRepository(Protocol):
     async def create(self, values: Mapping[str, Any]) -> str: ...
+
+    async def state(self, session_id: str) -> SessionState | None: ...
 
     async def get(self, session_id: str) -> SessionRecord | None: ...
 
@@ -78,6 +87,14 @@ class SessionRepository(Protocol):
         extras: Mapping[str, Any],
     ) -> str: ...
 
+    async def soft_delete(self, session_id: str, deleted_at: datetime) -> bool: ...
+
 
 class RunRepository(Protocol):
     async def list_for_session(self, session_id: str) -> list[RunRecord]: ...
+
+    async def soft_delete_for_session(
+        self,
+        session_id: str,
+        deleted_at: datetime,
+    ) -> int: ...

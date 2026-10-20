@@ -40,6 +40,7 @@ NON_FINITE_NUMBER = error("non_finite_number", "Numbers must be finite.")
 VALUE_OUT_OF_RANGE = error("value_out_of_range", "An integer is outside the supported range.")
 SESSION_NOT_FOUND = error("session_not_found", "Session not found.")
 SESSION_NOT_OPEN = error("session_not_open", "Session is not open for updates.")
+SESSION_DELETED = error("session_deleted", "Session has been deleted.")
 DOCUMENT_TOO_LARGE = error(
     "document_too_large", "The stored document would exceed the MongoDB size limit."
 )
@@ -108,8 +109,11 @@ def api_client(monkeypatch, request):
     sessions.get.return_value = None
     sessions.create.return_value = SESSION_ID
     sessions.patch_open_session.return_value = SESSION_ID
+    sessions.soft_delete.return_value = False
+    sessions.state.return_value = None
     runs = AsyncMock(spec=RunRepository)
     runs.list_for_session.return_value = []
+    runs.soft_delete_for_session.return_value = 0
 
     @asynccontextmanager
     async def fake_runtime(uri, database_name):

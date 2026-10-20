@@ -131,11 +131,13 @@ class SmokeTests(unittest.TestCase):
             "status": "COMPLETED", "completion_time": None, "last_step_executed": [],
             "execution_outcome": None,
             "metadata": {"private-key": {"name": "Private Person", "token": "private-secret"}},
+            "deleted_at": None,
             "runs": [{
                 "run_id": "68df8b00aef4d8537282f002", "session_id": SESSION_ID, "schema_version": 1,
                 "step": "private-step", "command": "private-command", "verdict": "CUSTOM",
                 "occurred_at": "2026-10-01T09:17:58.000Z", "received_at": "2026-10-01T09:17:59.456Z",
                 "details": {"$data.key": [None, "private-secret"]},
+                "deleted_at": None,
             }],
         }
         self.server.routes[SELECTED] = json_response(page([{
@@ -165,6 +167,15 @@ class SmokeTests(unittest.TestCase):
         self.assertIn("Session detail: HTTP 200", output)
         for private in (SESSION_ID, OTHER_ID, "Private Person", "private-key", "private-secret", "$data.key", "private-command"):
             self.assertNotIn(private, output)
+
+    def test_soft_deleted_detail_with_timestamps_passes(self):
+        detail = self.populated()
+        detail["deleted_at"] = "2026-10-02T08:00:00.123Z"
+        detail["runs"][0]["deleted_at"] = "2026-10-02T08:00:00.123Z"
+        self.server.routes["/v1/sessions/" + SESSION_ID] = json_response(detail)
+        result, output = self.invoke()
+        self.assertEqual(result, 0, output)
+        self.assertIn("Session detail: HTTP 200", output)
 
     def test_session_appearing_between_lists_still_gets_detail(self):
         detail = self.populated()
@@ -283,7 +294,9 @@ class SmokeTests(unittest.TestCase):
             [{"session_id": "https://example.invalid/private-secret"}],
             [{"session_id": SESSION_ID, "runs": []}],
             [{"session_id": SESSION_ID, "private-key": "private-secret"}],
-            [{"session_id": SESSION_ID, "status": "COMPLETED"}],
+            [{"session_id": SESSION_ID, "status": None}],
+            [{"session_id": SESSION_ID, "status": "DELETED"}],
+            [{"session_id": SESSION_ID, "completion_time": None}],
             [{"session_id": SESSION_ID, "started_at": None}],
             [{"session_id": SESSION_ID, "metadata": []}],
         ):
@@ -297,6 +310,9 @@ class SmokeTests(unittest.TestCase):
         self.populated()
         for row in (
             {"session_id": SESSION_ID},
+            {"session_id": SESSION_ID, "status": "COMPLETED"},
+            {"session_id": SESSION_ID, "started_at": "2026-09-01T09:07:04.000Z", "status": "IN_PROGRESS",
+             "metadata": {"boundary": "checkout", "invoked_by": {"email": "operator@example.invalid"}}},
             {"session_id": SESSION_ID, "metadata": {}},
             {"session_id": SESSION_ID, "metadata": {"boundary": None, "invoked_by": [{"name": None}, {}]}},
             {"session_id": SESSION_ID, "metadata": {"invoked_by": "arbitrary-value"}},
@@ -317,7 +333,10 @@ class SmokeTests(unittest.TestCase):
             "2026-10-01T09:07:04.123+00:00", "2026-02-30T09:07:04.123Z",
             "2026-13-01T09:07:04.123Z", "private-secret",
         ):
-            for target in ("selected", "started_at", "received_at", "completion_time", "run_occurred_at", "run_received_at"):
+            for target in (
+                "selected", "started_at", "received_at", "completion_time", "deleted_at",
+                "run_occurred_at", "run_received_at", "run_deleted_at",
+            ):
                 with self.subTest(target=target, value=invalid):
                     changed = copy.deepcopy(detail)
                     self.server.routes[SELECTED] = json_response(page([{"session_id": SESSION_ID}]))
@@ -357,7 +376,7 @@ class SmokeTests(unittest.TestCase):
     def test_full_detail_requires_metadata_runs_and_complete_run_shape(self):
         original = self.populated()
         variants = []
-        for key in ("metadata", "runs", "received_at"):
+        for key in ("metadata", "runs", "received_at", "deleted_at"):
             detail = copy.deepcopy(original)
             del detail[key]
             variants.append(detail)
@@ -368,6 +387,9 @@ class SmokeTests(unittest.TestCase):
         variants.append(detail)
         detail = copy.deepcopy(original)
         detail["runs"][0]["details"] = []
+        variants.append(detail)
+        detail = copy.deepcopy(original)
+        del detail["runs"][0]["deleted_at"]
         variants.append(detail)
         for index, detail in enumerate(variants):
             with self.subTest(variant=index):

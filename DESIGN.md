@@ -123,6 +123,7 @@ Build these capabilities:
 - Store session documents and run documents in separate MongoDB collections.
 - Accept session creation, run creation, and open-session partial updates.
 - List sessions as filtered, cursor-paginated pages, and return one session with its runs.
+- Soft-delete one or many sessions together with their runs.
 - Render session lists and details in a client-side React application.
 - Serve the built React application from a Python FastAPI webserver.
 - Let React call the API directly through NGINX with same-origin relative URLs.
@@ -139,11 +140,13 @@ Do not add the following:
 - offset or page-number pagination, jumping to an arbitrary page, or snapshot claims across page reads
 - retries, queues, sweepers, caches, Redis, or cross-collection transactions
 - idempotency keys, replay deduplication, optimistic counters, or alternate ID lookup
-- `PUT`, delete endpoints, generic CRUD bases, an ODM, Motor, or a separate business or domain layer
+- `PUT`, hard deletes through the API, generic CRUD bases, an ODM, Motor, or a separate business or domain layer
 - a dependency injection container, provider auto-registration, or speculative extension folders
 - automatic computation or verification of outcome counts
 
 The API is intentionally unauthenticated. Any host that can reach port 8080 can read and write `/v1/*`. Unlimited request and response bodies can consume application memory, network capacity, and disk. Session detail responses remain unbounded in the size of one session and its runs. List pages are bounded by the page size, but an unauthenticated caller can still walk every page and can request a case-insensitive substring filter that the server evaluates without a supporting index. Do not reduce these risks by changing the approved POC contract. Document them in deployment instructions and keep production use out of scope.
+
+The soft-delete endpoints in section 7 are unauthenticated like every other `/v1` route. Any host that can reach port 8080 can soft-delete every session. Soft-deleted records remain in MongoDB, and only an operator with direct database access can restore or remove them. Restricting delete use to one operator is an operational intention, not a control, until HTTP authentication is added outside this POC.
 
 MongoDB still limits each final BSON document to 16 MiB. A session `PATCH` can cross this limit as metadata grows. Return `413` when that happens.
 
@@ -166,6 +169,8 @@ React fetches only these relative API paths:
 
 List requests may append repeated `fields` query parameters and the single-valued filter and paging parameters defined in section 8. Selection, filtering, and paging use the query string, not a GET request body.
 
+The browser never calls the delete routes, and the React application has no delete control.
+
 NGINX sends `/v1/*` to the API on container port 8000. It sends UI and asset requests to the web container on port 8080. The web container serves static React assets and its internal liveness route only. It does not call the API or MongoDB.
 
 The UI and API share the NGINX origin, so browser reads require no CORS configuration. The absence of CORS is not a security control. The unauthenticated `/v1/*` endpoints are public to every host that can reach NGINX.
@@ -183,14 +188,14 @@ React renders JSON in the browser. There is no SSR. Node 22 is used only in a mu
 | Transport and identity | HTTPS and authenticated agents | HTTP, no HTTP authentication |
 | Step identity | Run IDs | Step names in `last_step_executed` |
 | Session updates | Completion-oriented | Open partial `PATCH` while status is `IN_PROGRESS` |
-| Endpoints | Four original endpoints | Five `/v1` endpoints plus internal health routes |
+| Endpoints | Four original endpoints | Seven `/v1` endpoints plus internal health routes |
 | Legacy IDs | Agent UUIDs and aggregate batch shape | Server-generated MongoDB ObjectIds and one run per request |
 | `recorded_by` | Authenticated root field | No synthetic root field; supplied identity objects are unverified extras |
 | Versioning | Separate version field | Only server-generated `schema_version: 1` |
 | Initial outcome | Incomplete draft values | `execution_outcome: null`, never fake zeros |
 | Run timestamp | `at` in the sample | `occurred_at` on storage and response; `at` accepted only as an input alias |
 
-These comparisons are historical context, not claims about the current diagram. The living POC diagram follows this contract, including direct React-to-API reads through NGINX and HTTP without authentication. It distinguishes the four implemented `/v1` routes from the planned run-creation route. The target remains five `/v1` endpoints; section 15 records the remaining implementation work.
+These comparisons are historical context, not claims about the current diagram. The living POC diagram follows this contract, including direct React-to-API reads through NGINX and HTTP without authentication. It distinguishes the six implemented `/v1` routes, including the two operator soft-delete routes, from the planned run-creation route. The target is seven `/v1` endpoints; section 15 records the remaining implementation work.
 
 ## 4. API code structure and dependency direction
 
@@ -209,7 +214,7 @@ Controllers own HTTP routing and translate validated inputs into service calls. 
 
 `ObjectId`, `bson`, MongoDB clients, cursors, filters, update operators, and pipeline syntax must stay in repository adapter files. `indexes.py` may contain MongoDB index definitions. Repository protocols may use primitive ID strings, dictionaries used as DTOs, frozen dataclasses whose fields are primitives or other such dataclasses, and timezone-aware `datetime` values. They must not expose MongoDB clients, filters, cursors, projections, query operators, or BSON IDs.
 
-Repository identifier arguments are strings. An adapter must confirm that an identifier is a string before converting it, because `ObjectId(None)` generates a new identifier instead of failing and would silently target an unrelated document. `ObjectId` also accepts 12-byte values and existing `ObjectId` instances, which the string identifier contract does not allow. Keep this one conversion helper in `repositories/object_ids.py` and use it for every identifier the adapters parse. Treat any non-string value, including `None`, exactly like a malformed identifier string: session reads return no record, and session patch and run listing raise `session_not_found`. Reject the value before issuing any MongoDB operation.
+Repository identifier arguments are strings. An adapter must confirm that an identifier is a string before converting it, because `ObjectId(None)` generates a new identifier instead of failing and would silently target an unrelated document. `ObjectId` also accepts 12-byte values and existing `ObjectId` instances, which the string identifier contract does not allow. Keep this one conversion helper in `repositories/object_ids.py` and use it for every identifier the adapters parse. Treat any non-string value, including `None`, exactly like a malformed identifier string: session reads and state lookups return no record, session soft delete reports no match, run soft delete stamps nothing, and session patch and run listing raise `session_not_found`. Reject the value before issuing any MongoDB operation.
 
 The protocols are real test seams. They let service tests use small fakes without importing MongoDB. Keep each protocol limited to operations the service currently needs. Do not introduce generic repositories. Define these exact operations in `protocols.py`:
 
@@ -259,9 +264,13 @@ class SessionPage:
     has_newer: bool = False
     has_older: bool = False
 
+@dataclass(frozen=True, slots=True)
+class SessionState:
+    deleted_at: datetime | None
+
 class SessionRepository(Protocol):
     async def create(self, values: Mapping[str, Any]) -> str: ...
-    async def exists(self, session_id: str) -> bool: ...
+    async def state(self, session_id: str) -> SessionState | None: ...
     async def get(self, session_id: str) -> SessionRecord | None: ...
     async def list_page(self, query: SessionListQuery) -> SessionPage: ...
     async def patch_open_session(
@@ -270,6 +279,7 @@ class SessionRepository(Protocol):
         known: Mapping[str, Any],
         extras: Mapping[str, Any],
     ) -> str: ...
+    async def soft_delete(self, session_id: str, deleted_at: datetime) -> bool: ...
 
 class RunRepository(Protocol):
     async def create(
@@ -278,11 +288,18 @@ class RunRepository(Protocol):
         values: Mapping[str, Any],
     ) -> str: ...
     async def list_for_session(self, session_id: str) -> list[RunRecord]: ...
+    async def soft_delete_for_session(
+        self,
+        session_id: str,
+        deleted_at: datetime,
+    ) -> int: ...
 ```
 
 The record dictionaries are application DTOs. Their IDs are strings and their timestamps are Python datetimes. They never contain ObjectIds, clients, cursors, filters, or MongoDB operators. `SessionFilters` text values are literal search values, never patterns or expressions; the adapter escapes them.
 
 `PageAnchor` reports the sort key of a returned record separately from the record itself, because the sort key is not necessarily a selected response field. `has_newer` and `has_older` report only whether a further page exists in each direction at read time.
+
+`SessionRepository.state` performs one ID-only lookup that also reads `deleted_at`. It returns `None` for an absent or malformed session, and otherwise a `SessionState` whose `deleted_at` is `None` for a live session, including one whose stored document lacks the field. `SessionRepository.soft_delete` issues one guarded update that sets `deleted_at` only where `_id` matches and `deleted_at` is null or missing; it returns `True` exactly when `matched_count` is 1. `RunRepository.soft_delete_for_session` sets `deleted_at` on that session's runs whose `deleted_at` is null or missing, never overwrites an existing value, and returns the matched count. Neither adapter removes a document.
 
 For list reads, the service validates every query parameter before calling `list_page`. It resolves the default fields or normalizes supplied field paths, normalizes filters into `SessionFilters`, resolves the page size, and decodes any supplied cursor into a `PagePosition`. The `fields` tuple contains application field paths, not a database projection, and always includes `session_id`. Only the adapter maps this ID to `_id`, constructs the inclusion projection, and builds filter, boundary, and sort expressions.
 
@@ -291,12 +308,14 @@ Use this call mapping:
 | Router operation | Service operation | Repository operations |
 | --- | --- | --- |
 | Create session | `SessionService.create_session` | `SessionRepository.create` |
-| Create run | `RunService.create_run` | `SessionRepository.exists`, then `RunRepository.create` |
+| Create run | `RunService.create_run` | `SessionRepository.state`, then `RunRepository.create` |
 | Patch session | `SessionService.patch_session` | `SessionRepository.patch_open_session` |
 | List sessions | `SessionService.list_sessions` | `SessionRepository.list_page` |
 | Get session detail | `SessionService.get_session` | `SessionRepository.get`, then `RunRepository.list_for_session` |
+| Delete session | `SessionService.delete_session` | `SessionRepository.soft_delete`; on no match, `SessionRepository.state`; then `RunRepository.soft_delete_for_session` when the session exists |
+| Bulk delete sessions | `SessionService.delete_sessions` | The delete session sequence for each unique ID, one ID at a time |
 
-Services and `mapping.py` validate and partition values. `session_listing.py` owns list query validation, page size resolution, the cursor codec, and the result envelope assembly; it holds no MongoDB syntax. Services set `schema_version`, initial status fields, and `received_at`. `RunService.create_run` checks parent existence before insertion, regardless of parent status. Repositories generate ObjectIds, copy inputs, issue database operations, build filter, boundary, and sort expressions, escape literal filter text, and map stored BSON to application DTOs. Do not duplicate business checks in adapters.
+Services and `mapping.py` validate and partition values. `session_listing.py` owns list query validation, page size resolution, the cursor codec, and the result envelope assembly; it holds no MongoDB syntax. Services set `schema_version`, initial status fields, `deleted_at: null`, `received_at`, and the soft-delete timestamp. `RunService.create_run` checks parent state before insertion: an absent parent is `404`, a soft-deleted parent is `409 session_deleted`, and any other parent accepts the run regardless of status. Repositories generate ObjectIds, copy inputs, issue database operations, build filter, boundary, and sort expressions, escape literal filter text, and map stored BSON to application DTOs. Do not duplicate business checks in adapters.
 
 `repositories/mongo_runtime.py` owns the PyMongo client, database handle, ping, index startup, and shutdown. Its factory constructs the client exactly as follows, using values from settings:
 
@@ -312,7 +331,7 @@ AsyncMongoClient(
 
 The adapter factory returns initialized session and run repository objects plus an async close operation. `main.py` calls this factory from lifespan. This keeps `AsyncMongoClient`, the database handle, BSON, and index calls inside repository adapter files.
 
-Write concern is deployment configuration, not application code. Collections inherit the client and database write concern that `MONGO_URI` and the server supply. Do not hardcode a write concern on a collection, because that silently discards a configured durability or journaling setting. Writes must be acknowledged: the create path returns a server-generated identifier and the patch path decides `404`, `409`, and success from `matched_count`, neither of which an unacknowledged write reports. Startup must therefore reject an unacknowledged write concern, such as `w=0`, before the ping and index step, close the client, and fail with a nonzero process exit. Keep that startup message fixed and free of URI or credential text. Do not add a write-concern environment variable.
+Write concern is deployment configuration, not application code. Collections inherit the client and database write concern that `MONGO_URI` and the server supply. Do not hardcode a write concern on a collection, because that silently discards a configured durability or journaling setting. Writes must be acknowledged: the create path returns a server-generated identifier and the patch and soft-delete paths decide `404`, `409`, and success from `matched_count`, neither of which an unacknowledged write reports. Startup must therefore reject an unacknowledged write concern, such as `w=0`, before the ping and index step, close the client, and fail with a nonzero process exit. Keep that startup message fixed and free of URI or credential text. Do not add a write-concern environment variable.
 
 `dependencies.py` contains plain FastAPI providers. Lifespan stores the initialized repository objects on `app.state`. Providers read those repositories and construct lightweight services. They do not expose a database handle to services and do not create a client per request.
 
@@ -325,7 +344,7 @@ Write concern is deployment configuration, not application code. Collections inh
 
 Startup must fail with a nonzero process exit if the write concern is unacknowledged or if ping or index creation fails. Do not use developer reload in containers. Run one Uvicorn worker by default. A compose startup gate does not guarantee later availability.
 
-PyMongo async `find()` returns an async cursor synchronously. Do not await `find()`. Await network operations such as `insert_one`, `update_one`, `find_one`, cursor `to_list`, database `command`, and client close according to the pinned driver API. Do not share an async client across event loops or threads.
+PyMongo async `find()` returns an async cursor synchronously. Do not await `find()`. Await network operations such as `insert_one`, `update_one`, `update_many`, `find_one`, cursor `to_list`, database `command`, and client close according to the pinned driver API. Do not share an async client across event loops or threads.
 
 ## 5. Storage model
 
@@ -344,6 +363,7 @@ Use two collections named `sessions` and `runs` in `MONGO_DB_NAME`.
 | `last_step_executed` | Array of strings | JSON array of strings |
 | `execution_outcome` | Document or null | JSON object or null |
 | `metadata` | Document | JSON object |
+| `deleted_at` | BSON UTC datetime, null, or absent | RFC 3339 UTC string with milliseconds or null |
 
 The session document has only `_id` as its identifier. Do not store a duplicate `session_id` field. The ObjectId is a BSON value, never a string in storage.
 
@@ -360,8 +380,11 @@ The session document has only `_id` as its identifier. Do not store a duplicate 
 | `occurred_at` | BSON UTC datetime | RFC 3339 UTC string with milliseconds |
 | `received_at` | BSON UTC datetime | RFC 3339 UTC string with milliseconds |
 | `details` | Document | JSON object |
+| `deleted_at` | BSON UTC datetime, null, or absent | RFC 3339 UTC string with milliseconds or null |
 
 The run `_id` is its own server-generated ObjectId. The stored `session_id` is the parent session ObjectId parsed from the URL. Do not store a duplicate `run_id`.
+
+`deleted_at` is server-owned soft-delete state on both collections. New sessions and runs store `deleted_at: null`. Documents written before this field existed lack it. A missing `deleted_at` means not deleted, and the API returns it as `null`. Do not backfill it. A non-null value records when the session was soft-deleted; runs carry the timestamp of their parent's deletion. Clients cannot set or clear it. The API never removes a session or run document; hard deletion is an operator procedure described in section 13.
 
 On output, convert ObjectIds explicitly to 24-character lowercase hexadecimal strings. Rename session `_id` to `session_id` and run `_id` to `run_id`. Do not emit `storage_id` or Extended JSON.
 
@@ -381,7 +404,7 @@ Copy documents before passing them to the driver so driver-side mutation cannot 
 
 ### Schema version changes
 
-Keep recognized and consumed field sets centralized in `mapping.py`. A future approved stored-shape change must increment `schema_version`. It must also define either a deliberate data backfill or a backward-reader contract before code lands. Do not add a migration framework or version dispatch now. Never reinterpret extras or rewrite legacy documents automatically.
+Keep recognized and consumed field sets centralized in `mapping.py`. A future approved stored-shape change must increment `schema_version`. It must also define either a deliberate data backfill or a backward-reader contract before code lands. The optional server-owned `deleted_at` field is an approved exception: it does not increment `schema_version`, and its backward-reader contract is that a missing value reads as null. Do not add a migration framework or version dispatch now. Never reinterpret extras or rewrite legacy documents automatically.
 
 ## 6. JSON parsing and validation
 
@@ -467,6 +490,7 @@ status
 completion_time
 last_step_executed
 execution_outcome
+deleted_at
 ```
 
 Require `started_at` as an aware RFC 3339 string. The root session `started_at` is set only during session creation. All other top-level fields are extras under `metadata`.
@@ -478,7 +502,8 @@ Initialize server-owned root fields exactly as follows:
   "status": "IN_PROGRESS",
   "completion_time": null,
   "last_step_executed": [],
-  "execution_outcome": null
+  "execution_outcome": null,
+  "deleted_at": null
 }
 ```
 
@@ -517,17 +542,18 @@ run_id
 session_id
 received_at
 schema_version
+deleted_at
 ```
 
 Require nonempty strict strings for `step`, `command`, and `verdict`. Do not define an enum or an arbitrary maximum length for these fields.
 
 Require exactly one of `at` or `occurred_at`. Both are aware RFC 3339 timestamp strings. If both appear, return `400 timestamp_conflict`, even when their values are equal. Promote the accepted value to stored `occurred_at` and remove the input name from extras.
 
-All other fields, including `args`, go under `details`.
+All other fields, including `args`, go under `details`. The server stores `deleted_at: null` on the new run.
 
-The parent session must exist. A malformed 24-character ObjectId path is treated like an unknown ID and returns `404 session_not_found`. Do not perform alternate ID lookup.
+The parent session must exist. A malformed 24-character ObjectId path is treated like an unknown ID and returns `404 session_not_found`. Do not perform alternate ID lookup. A soft-deleted parent returns `409 session_deleted`.
 
-Run insertion is allowed after the parent is terminal. The agent should normally upload all runs before finishing the session, but the server does not freeze runs. There is no cross-collection transaction or invariant that promises a run and parent snapshot.
+Run insertion is allowed after the parent is terminal. The agent should normally upload all runs before finishing the session, but the server does not freeze runs. There is no cross-collection transaction or invariant that promises a run and parent snapshot. The parent state check and the insert are separate operations, so a run can still be inserted, unstamped, under a parent that was soft-deleted between them. This race is accepted; repeating the delete stamps that run.
 
 ### `PATCH /v1/sessions/{session_id}`
 
@@ -556,7 +582,7 @@ Response, `200 OK`:
 }
 ```
 
-This is an open partial update. It succeeds only while the stored session status is `IN_PROGRESS`.
+This is an open partial update. It succeeds only while the stored session status is `IN_PROGRESS` and the session is not soft-deleted.
 
 Reject these top-level fields with `400 forbidden_field` before Pydantic:
 
@@ -566,6 +592,7 @@ session_id
 started_at
 received_at
 schema_version
+deleted_at
 ```
 
 `started_at` is creation-only. Reject every patch that contains it at the top level, including an identical value, null, or a malformed timestamp. The raw JSON value checks in section 6, including NUL keys, non-finite numbers, signed 64-bit integer range, and UTF-8 validity, still run first. If those checks pass, return `400 forbidden_field` before Pydantic validation, value partitioning, or any repository operation. Reject the entire patch, including any otherwise valid fields in the same body. Do not read the session first.
@@ -603,7 +630,7 @@ Unknown top-level fields are shallow-merged one level into `metadata`. Existing 
 
 replaces an existing `metadata.invoked_by` object in full. An existing `email` inside that object is lost.
 
-An empty object is a valid no-op only while the session is open. It still executes the guarded update. It returns `200` when the `_id` and open status match. The same payload returns `409 session_not_open` for a terminal session.
+An empty object is a valid no-op only while the session is open. It still executes the guarded update. It returns `200` when the `_id`, open status, and not-deleted condition match. The same payload returns `409 session_not_open` for a terminal session and `409 session_deleted` for a soft-deleted session.
 
 #### Required atomic update
 
@@ -627,25 +654,93 @@ async def patch_open_session(session_id: str, known: dict, extras: dict) -> str:
         ]
     }
     result = await collection.update_one(
-        {"_id": object_id, "status": "IN_PROGRESS"},
+        {"_id": object_id, "status": "IN_PROGRESS", "deleted_at": None},
         [{"$set": set_spec}],
         upsert=False,
     )
     if result.matched_count == 1:
         return session_id
-    existing = await collection.find_one({"_id": object_id}, {"_id": 1})
+    existing = await collection.find_one({"_id": object_id}, {"_id": 1, "deleted_at": 1})
     if existing is None:
         raise SessionNotFound()
+    if existing.get("deleted_at") is not None:
+        raise SessionDeleted()
     raise SessionNotOpen()
 ```
 
 This snippet belongs in a repository adapter, where `ObjectId` is allowed. The implementation must validate malformed IDs before entering this function or map them to `SessionNotFound` in the adapter. The real adapter also rejects a non-string identifier through the shared helper in section 4 before constructing the filter, so `ObjectId(None)` can never generate an identifier here.
 
-`matched_count`, not `modified_count`, determines success. An identical update still matched the guarded document. A zero match requires one ID-only lookup to distinguish `404` from `409`.
+`matched_count`, not `modified_count`, determines success. An identical update still matched the guarded document. A zero match requires one ID-only lookup that also reads `deleted_at` to distinguish `404`, `409 session_deleted`, and `409 session_not_open`. MongoDB's `{"deleted_at": None}` equality matches both a stored null and a missing field, so documents that predate the field remain patchable.
 
 Wrapping whole values with `$literal` prevents input such as `"$status"` or `{"$set":{"x":1}}` from being evaluated as a MongoDB expression. Wrapping the whole extras object also preserves dotted and dollar-prefixed nested keys as data. `$mergeObjects` applies last-value-wins replacement at the top metadata level.
 
 The filter makes the status guard atomic with root and metadata changes. Concurrent terminal patches can both validate, but only one may match the open document.
+
+### `DELETE /v1/sessions/{session_id}`
+
+Request:
+
+```text
+DELETE /v1/sessions/68df8b00aef4d8537282f001
+```
+
+Response, `204 No Content`, with no body.
+
+This is a soft delete. It takes no request body and applies to a session in any status, including `IN_PROGRESS`. The API never removes a session or run document.
+
+The service generates one UTC timestamp `T`, truncated to milliseconds, and then:
+
+1. Calls `SessionRepository.soft_delete(session_id, T)`. This sets `deleted_at` to `T` only where `_id` matches and `deleted_at` is null or missing.
+2. On a match, calls `RunRepository.soft_delete_for_session(session_id, T)` and returns `204`.
+3. On no match, calls `SessionRepository.state(session_id)`. An absent session returns `404 session_not_found`; a malformed ObjectId is treated the same way. A session that is already soft-deleted keeps its original `deleted_at`. The service calls `RunRepository.soft_delete_for_session` with that original timestamp, which stamps only runs that are still unstamped, and returns `409 session_deleted`.
+
+Use `matched_count` for both decisions. Never overwrite an existing `deleted_at` on a session or run.
+
+The session update and the run update are separate operations with no transaction. If the run update fails or the process stops after the session is stamped, the session is soft-deleted while some or all of its runs are not. Session detail still returns those runs with the parent. Repeating the delete returns `409 session_deleted` and stamps the remaining runs with the session's original timestamp. Repeating a delete is not an idempotency feature, and the response does not change to `204`.
+
+### `POST /v1/sessions/bulk-delete`
+
+Request:
+
+```json
+{
+  "session_ids": [
+    "68df8b00aef4d8537282f001",
+    "68df8b00aef4d8537282f003",
+    "68df8b00aef4d8537282f001"
+  ]
+}
+```
+
+Response, `200 OK`:
+
+```json
+{
+  "deleted": [
+    "68df8b00aef4d8537282f001"
+  ],
+  "already_deleted": [],
+  "not_found": [
+    "68df8b00aef4d8537282f003"
+  ]
+}
+```
+
+The body follows the media type, parsing, and raw value checks in section 6. `session_ids` is required and must be a non-empty JSON array of strict strings. Return `400 missing_field` when it is absent and `400 invalid_field` when it is null, empty, not an array, or contains a non-string item. Reject any other top-level field with `400 invalid_field`; this endpoint has no extras wrapper. Validate the whole body before any repository call. There is no maximum number of IDs.
+
+Remove duplicate IDs, keeping the first occurrence of each. Process the unique IDs one at a time, in that order, with exactly the single-delete sequence above. Each unique ID appears exactly once in the response:
+
+| List | Meaning |
+| --- | --- |
+| `deleted` | This request soft-deleted the session |
+| `already_deleted` | The session was already soft-deleted; its unstamped runs were stamped with its original timestamp |
+| `not_found` | No session has this ID, including a malformed ID string |
+
+Each list preserves processing order. The response always contains all three lists, and empty lists are present as `[]`.
+
+The batch is not atomic. If a database error occurs partway through, return `500 internal_error`. IDs processed before the error remain soft-deleted, and the session being processed may be stamped while its runs are not. Repeating the request is safe: processed IDs then appear in `already_deleted`.
+
+Register this route so `POST /v1/sessions/bulk-delete` is never treated as a session ID path. `GET` and `PATCH` on `/v1/sessions/bulk-delete` keep their existing behavior for a malformed session ID.
 
 ## 8. Read endpoint contracts
 
@@ -700,6 +795,8 @@ An empty result is a `200 OK` response with this body:
 
 Every list response is this envelope. It has exactly these five fields and no others. `items` is the page, in `started_at` descending then `_id` descending order. This replaces the previous unpaginated array response; a client that expects a bare JSON array must be updated.
 
+Soft-deleted sessions never appear in a list. The adapter adds a fixed `deleted_at` null-or-missing condition to every page, boundary existence, and count query, so `items`, `total_count`, and both cursors exclude them. This condition is not a query parameter and cannot be disabled. A session soft-deleted between page reads leaves the result set like any other membership change, and a cursor anchored on it remains valid.
+
 Sort by `started_at` descending, then `_id` descending, always. There is no client-selectable sort field or direction.
 
 With no `fields` parameter, each item contains only this root allowlist. Exclude both `metadata` and `runs`:
@@ -748,7 +845,7 @@ Example response, `200 OK`:
 ```
 
 - Always return `session_id`, including for `?fields=session_id`, which returns ID-only records.
-- Select any root field in the default allowlist, `metadata`, or a nested path below `metadata` or `execution_outcome`. Never select `runs` on the list endpoint.
+- Select any root field in the default allowlist, `metadata`, or a nested path below `metadata` or `execution_outcome`. Never select `runs` or `deleted_at` on the list endpoint.
 - Selecting a parent returns its complete subtree without coercing values or dropping arbitrary keys. Dots in a selector denote nesting. To retrieve a key containing a literal dot or a dollar prefix, select its parent instead.
 - Reject unknown roots, descendants of non-container root fields, empty selectors or path components, NUL, invalid UTF-8, and dollar-prefixed path components with `400 invalid_field`. Validate all selectors before deduplication or collapsing parent/child overlaps; a valid parent must not conceal an invalid child.
 - Deduplicate paths and collapse descendants when their parent is selected. The response contains no unrequested root fields other than the mandatory ID. Do not add application defaults for omitted fields. Preserve empty objects already returned by the database projection, such as `metadata: {}` when a selected leaf is absent.
@@ -849,6 +946,7 @@ Response after the worked lifecycle above, `200 OK`:
       "email": "operator@example.invalid"
     }
   },
+  "deleted_at": null,
   "runs": [
     {
       "run_id": "68df8b00aef4d8537282f002",
@@ -864,13 +962,16 @@ Response after the worked lifecycle above, `200 OK`:
           "consumer-actions.json",
           "provider-actions.json"
         ]
-      }
+      },
+      "deleted_at": null
     }
   ]
 }
 ```
 
-Return `404 session_not_found` for an unknown or malformed ObjectId. Otherwise return the same session root allowlist plus `metadata` and `runs`. A session with no runs contains `"runs": []`.
+Return `404 session_not_found` for an unknown or malformed ObjectId. Otherwise return the same session root allowlist plus `metadata`, `deleted_at`, and `runs`. A session with no runs contains `"runs": []`.
+
+Detail returns soft-deleted sessions with `200`, so maintainers can inspect them by direct URL. The session's `deleted_at` holds its deletion timestamp, and its runs are returned whether or not they are stamped. A missing stored `deleted_at` is returned as `null`. Detail never filters on `deleted_at`.
 
 Sort runs by `occurred_at` ascending, then `_id` ascending. Each run contains exactly:
 
@@ -884,6 +985,7 @@ verdict
 occurred_at
 received_at
 details
+deleted_at
 ```
 
 Use two queries: one for the session and one for its runs. Do not use `$lookup` or materialize a joined BSON document. A joined document could hit the 16 MiB document limit.
@@ -924,9 +1026,10 @@ Use these codes where applicable:
 | 400 | `non_finite_number` | `Numbers must be finite.` | NaN or infinity found |
 | 400 | `value_out_of_range` | `An integer is outside the supported range.` | Integer is outside signed 64-bit range |
 | 404 | `route_not_found` | `Route not found.` | Framework route does not exist |
-| 404 | `session_not_found` | `Session not found.` | Parent or requested session absent, including malformed ObjectId |
+| 404 | `session_not_found` | `Session not found.` | Parent, requested, or delete-target session absent, including malformed ObjectId |
 | 405 | `method_not_allowed` | `Method not allowed.` | Framework route exists but method is unsupported |
-| 409 | `session_not_open` | `Session is not open for updates.` | Any valid patch targets a terminal session |
+| 409 | `session_not_open` | `Session is not open for updates.` | Any valid patch targets a terminal session that is not soft-deleted |
+| 409 | `session_deleted` | `Session has been deleted.` | Patch, run creation, or single delete targets a soft-deleted session |
 | 413 | `document_too_large` | `The stored document would exceed the MongoDB size limit.` | Insert or update exceeds final BSON document size |
 | 415 | `unsupported_media_type` | `Content-Type must be application/json.` | Request media type is not JSON |
 | 500 | `internal_error` | `The server could not complete the request.` | Sanitized unexpected server or database failure |
@@ -1021,9 +1124,9 @@ sessions_started_desc_idx
 runs_session_occurred_idx
 ```
 
-MongoDB supplies the unique `_id` indexes. Do not add indexes on extras, agent IDs, status, or other fields. Do not add uniqueness for legacy IDs.
+MongoDB supplies the unique `_id` indexes. Do not add indexes on extras, agent IDs, status, `deleted_at`, or other fields. Do not add uniqueness for legacy IDs.
 
-`sessions_started_desc_idx` also serves list pagination: it covers the sort order and the `(started_at, _id)` boundary comparison. List filters are deliberately unindexed. At the POC scale of fewer than ten thousand sessions a filtered page is a scan over the sorted index, and a case-insensitive substring filter could not use an ordinary index anyway. Measure representative queries before proposing a new index, and treat any addition as a deliberate index change under the rule below.
+`sessions_started_desc_idx` also serves list pagination: it covers the sort order and the `(started_at, _id)` boundary comparison. List filters are deliberately unindexed. The fixed soft-delete condition is evaluated within the same scan. At the POC scale of fewer than ten thousand sessions a filtered page is a scan over the sorted index, and a case-insensitive substring filter could not use an ordinary index anyway. Measure representative queries before proposing a new index, and treat any addition as a deliberate index change under the rule below.
 
 An index definition change requires a deliberate migration or a new name. Startup must not automatically drop or replace an existing index.
 
@@ -1069,6 +1172,7 @@ The React app provides:
 - loading, empty, and error states
 - browser-local timestamp display, with the resolved time zone named in each view
 - read-only expandable JSON for `metadata` and each run's `details`
+- a deleted-session banner on the detail view
 
 ### Session table and requests
 
@@ -1088,6 +1192,8 @@ The list request repeats `fields` for these paths. It expects only the selected 
 Changing the table columns requires a frontend rebuild. It does not require a new API endpoint or a runtime column picker. Keep projected-list validation separate from strict default-summary and full-detail validation.
 
 The detail view fetches `GET /v1/sessions/{session_id}` and receives full `metadata` and `runs`, independently of the list selection. Encode the session ID as one URL path segment. Preserve backend field names and JSON types. Do not compute a frontend `execution_outcome` from runs.
+
+A soft-deleted session is reachable only by entering its detail URL directly, because lists exclude it. When the session's `deleted_at` is a timestamp, the detail view shows a status banner above the record: "This session has been deleted." followed by "Deleted at" and the browser-local deletion time in a `time` element whose `dateTime` keeps the API text. The rest of the record renders unchanged. The banner is not an error and offers no delete or restore control. As in the API, a missing `deleted_at` on the session or a run means not deleted and shows no banner. A present value must be null or a valid API timestamp; any other value is an invalid response.
 
 ### Filters and drafts
 
@@ -1253,6 +1359,8 @@ URL-encode the application username and password when constructing `MONGO_URI`. 
 
 MongoDB initialization scripts run only when the data directory is first initialized. Editing `.env` does not rotate a user in an existing named volume. Document an explicit credential rotation procedure if one is later needed. Do not suggest `docker compose down -v` as a normal fix because it destroys stored data.
 
+Hard deletion is an operator procedure, not an API capability. An operator removes soft-deleted sessions and their runs directly with `mongosh` in the `mongo` container, authenticating with the root credentials. Remove a session's runs by their `session_id` together with the session document. Do not grant the runtime application user any privilege beyond `readWrite`, and do not add hard-delete code to the API.
+
 `TEST_MONGO_URI` belongs only to tests. It uses a separately provisioned privileged test user on a test MongoDB deployment. That user authenticates against `admin` and may create and drop isolated test databases. Do not grant those privileges to the runtime application user. Do not use the runtime application database for integration tests.
 
 ## 14. Tests and verification
@@ -1313,6 +1421,13 @@ Cover at least these cases:
 - Detail reads use separate queries and make no snapshot claim.
 - Late run insertion into a terminal session succeeds.
 - Request ID acceptance, generation, and response-header echo follow the API contract in section 11.
+- New sessions and runs store `deleted_at: null`. `deleted_at` is a reserved top-level field on session create, session patch, and run create.
+- Single delete returns `204` for open and terminal sessions, stamps the session and its runs with one timestamp, and removes no document. An unknown or malformed ID returns `404`. A repeated delete returns `409 session_deleted`, keeps the original timestamp, and stamps only runs that were still unstamped.
+- An injected run-stamp failure after the session is stamped returns `500` and leaves the session soft-deleted; a repeated delete then stamps the remaining runs.
+- Bulk delete removes duplicate IDs keeping the first occurrence, processes IDs in order, and reports each unique ID once in `deleted`, `already_deleted`, or `not_found`. Malformed ID strings are `not_found` and issue no MongoDB operation. An absent, null, empty, or non-array `session_ids`, a non-string item, and any other top-level field return `400` before any repository call.
+- Soft-deleted sessions are absent from list `items` and `total_count` under every filter, and `deleted_at` is rejected as a list `fields` selector.
+- Session detail returns a soft-deleted session with its `deleted_at` and all its runs. A stored document without `deleted_at` returns `null` for it.
+- Patch and run creation on a soft-deleted session return `409 session_deleted`. Patch on a terminal session that is not deleted still returns `409 session_not_open`.
 
 The MongoDB integration suite pins these behaviors against the chosen image and PyMongo lock:
 
@@ -1329,6 +1444,8 @@ The MongoDB integration suite pins these behaviors against the chosen image and 
 - a previous cursor returns the preceding page and the newest page offers no previous cursor
 - an ID-only page does not leak the sort key, and selected metadata paths survive a filtered page
 - `total_count` covers all matches rather than the returned page
+- the `deleted_at` null equality excludes stamped sessions from lists and matches both stored null and a missing field
+- soft-delete guards decide success from `matched_count`, never overwrite an existing `deleted_at`, and a repeated bulk request reports already processed IDs in `already_deleted`
 
 ### Static webserver tests
 
@@ -1340,7 +1457,7 @@ Cover the known SPA routes, internal health, built asset MIME types, missing ass
 
 Use Vitest and the React testing library under jsdom. Pin the main suite to `Asia/Kolkata` so local rendering and local-to-UTC conversion do not depend on the host zone. Keep separate conversion coverage under `America/New_York` for a skipped spring time and a repeated autumn time.
 
-Cover loading, empty, and error states; unknown count rendering; local timestamps and the named zone; unrecognized verdict text; missing identity values; expandable metadata and details; and HTML-like stored text escaping. Assert the exact relative `/v1/sessions` and encoded `/v1/sessions/{session_id}` fetch paths, with no `/ui/api/*` calls. Cover the five-field page envelope and its rejection of a bare array; configured field requests; filter serialization, including omitted empty values and preserved literal text; local date bounds converted to UTC instants, an inverted range, and a local time skipped by a daylight saving change; drafts that issue no request until submitted and remain mounted while the panel is hidden; supported browser page sizes; cursor navigation that keeps the applied filters, and the cursor reset on a filter or page-size change; restored links, including rejected unknown, repeated, and invalid parameters; browser history restoring applied filters; the three empty results; and the return from a detail view to the same filtered page. Cover non-OK API envelopes, non-JSON NGINX errors, and network failures without rendering raw HTML.
+Cover loading, empty, and error states; unknown count rendering; local timestamps and the named zone; unrecognized verdict text; missing identity values; expandable metadata and details; and HTML-like stored text escaping. Assert the exact relative `/v1/sessions` and encoded `/v1/sessions/{session_id}` fetch paths, with no `/ui/api/*` calls. Cover the five-field page envelope and its rejection of a bare array; configured field requests; filter serialization, including omitted empty values and preserved literal text; local date bounds converted to UTC instants, an inverted range, and a local time skipped by a daylight saving change; drafts that issue no request until submitted and remain mounted while the panel is hidden; supported browser page sizes; cursor navigation that keeps the applied filters, and the cursor reset on a filter or page-size change; restored links, including rejected unknown, repeated, and invalid parameters; browser history restoring applied filters; the three empty results; and the return from a detail view to the same filtered page. Cover the deleted-session banner with its local time and API `dateTime`, its absence when `deleted_at` is null or missing, and rejection of an invalid `deleted_at` on a session or run. Cover non-OK API envelopes, non-JSON NGINX errors, and network failures without rendering raw HTML.
 
 The jsdom suite is not browser verification. Do not report browser behavior as verified unless the separate manual browser checks were performed.
 
@@ -1428,7 +1545,7 @@ After deployment, run the root smoke command:
 python3 scripts/smoke.py --base-url http://localhost:8080
 ```
 
-The fixture web tests, image tests, frontend unit/interaction tests, API unit tests, the guarded list-query integration suite, and the HTTP smoke workflow have executable files in the worktree. The remaining guarded real-Mongo coverage for oversize writes and write concern, the Compose test overlay, the run-creation endpoint, and API request-correlation middleware remain separate planned work. Do not describe those capabilities as verified by frontend deployment checks.
+The fixture web tests, image tests, frontend unit/interaction tests, API unit tests, the guarded list-query and soft-delete integration suites, and the HTTP smoke workflow have executable files in the worktree. The remaining guarded real-Mongo coverage for oversize writes and write concern, the Compose test overlay, the run-creation endpoint (including its `409 session_deleted` parent check), and API request-correlation middleware remain separate planned work. Do not describe those capabilities as verified by frontend deployment checks.
 
 Implement in small, reversible stages:
 

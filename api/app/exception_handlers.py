@@ -18,6 +18,7 @@ ERROR_RESPONSES = {
     ErrorCode.ROUTE_NOT_FOUND: (404, "Route not found."),
     ErrorCode.SESSION_NOT_FOUND: (404, "Session not found."),
     ErrorCode.SESSION_NOT_OPEN: (409, "Session is not open for updates."),
+    ErrorCode.SESSION_DELETED: (409, "Session has been deleted."),
     ErrorCode.METHOD_NOT_ALLOWED: (405, "Method not allowed."),
     ErrorCode.DOCUMENT_TOO_LARGE: (
         413, "The stored document would exceed the MongoDB size limit."

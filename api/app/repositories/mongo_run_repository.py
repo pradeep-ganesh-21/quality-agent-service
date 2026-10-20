@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from pymongo.asynchronous.database import AsyncDatabase
 
 from app.errors import ApplicationError, ErrorCode
@@ -15,6 +17,7 @@ _RUN_PROJECTION = {
     "occurred_at": 1,
     "received_at": 1,
     "details": 1,
+    "deleted_at": 1,
 }
 
 
@@ -36,5 +39,20 @@ class MongoRunRepository:
             record = dict(document)
             record["run_id"] = str(record.pop("_id"))
             record["session_id"] = str(record["session_id"])
+            # Runs written before soft delete existed lack the field.
+            record.setdefault("deleted_at", None)
             records.append(record)
         return records
+
+    async def soft_delete_for_session(self, session_id: str, deleted_at: datetime) -> int:
+        object_id = parse_object_id(session_id)
+        if object_id is None:
+            return 0
+        # Null equality also matches a missing field. Stamped runs keep their timestamp.
+        with translate_read_errors():
+            result = await self._collection.update_many(
+                {"session_id": object_id, "deleted_at": None},
+                {"$set": {"deleted_at": deleted_at}},
+                upsert=False,
+            )
+        return result.matched_count

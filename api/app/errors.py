@@ -14,6 +14,7 @@ class ErrorCode(StrEnum):
     ROUTE_NOT_FOUND = "route_not_found"
     SESSION_NOT_FOUND = "session_not_found"
     SESSION_NOT_OPEN = "session_not_open"
+    SESSION_DELETED = "session_deleted"
     METHOD_NOT_ALLOWED = "method_not_allowed"
     DOCUMENT_TOO_LARGE = "document_too_large"
     UNSUPPORTED_MEDIA_TYPE = "unsupported_media_type"

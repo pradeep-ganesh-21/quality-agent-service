@@ -22,8 +22,9 @@ OCCURRED_AT = datetime(2026, 10, 1, 9, 17, 58, tzinfo=timezone.utc)
 RECEIVED_AT = datetime(2026, 10, 1, 9, 17, 59, 456000, tzinfo=timezone.utc)
 RUN_PROJECTION = {
     "_id": 1, "session_id": 1, "schema_version": 1, "step": 1, "command": 1,
-    "verdict": 1, "occurred_at": 1, "received_at": 1, "details": 1,
+    "verdict": 1, "occurred_at": 1, "received_at": 1, "details": 1, "deleted_at": 1,
 }
+DELETED_AT = datetime(2026, 10, 2, 8, 0, 0, 123000, tzinfo=timezone.utc)
 
 
 @pytest.fixture
@@ -35,6 +36,7 @@ def repository():
     cursor.to_list = AsyncMock(return_value=[])
     collection = MagicMock()
     collection.find.return_value = cursor  # find() is deliberately synchronous.
+    collection.update_many = AsyncMock(return_value=MagicMock(matched_count=2, modified_count=2))
     database = MagicMock()
     database.__getitem__.return_value = collection
     return MongoRunRepository(database), collection, cursor, database
@@ -73,6 +75,7 @@ def test_list_maps_both_identifiers_without_mutating_documents(repository):
         "occurred_at": OCCURRED_AT,
         "received_at": RECEIVED_AT,
         "details": {"a.b": {"$set": "$verdict"}, "_id": "nested", "large": 2**63 - 1},
+        "deleted_at": None,
     }
     snapshot = deepcopy(document)
     cursor.to_list.return_value = [document]
@@ -87,10 +90,54 @@ def test_list_maps_both_identifiers_without_mutating_documents(repository):
         "occurred_at": OCCURRED_AT,
         "received_at": RECEIVED_AT,
         "details": snapshot["details"],
+        "deleted_at": None,
     }]
     assert document == snapshot
     assert records[0]["occurred_at"] is OCCURRED_AT
     assert "_id" not in records[0]
+
+
+def test_list_maps_a_missing_deletion_timestamp_to_null_and_keeps_a_stored_one(repository):
+    repo, _, cursor, _ = repository
+    cursor.to_list.return_value = [
+        {"_id": ObjectId(RUN_ID), "session_id": ObjectId(SESSION_ID)},
+        {"_id": ObjectId(SESSION_ID), "session_id": ObjectId(SESSION_ID), "deleted_at": DELETED_AT},
+    ]
+    records = asyncio.run(repo.list_for_session(SESSION_ID))
+    assert [record["deleted_at"] for record in records] == [None, DELETED_AT]
+
+
+def test_soft_delete_stamps_only_unstamped_runs_of_the_parent(repository):
+    repo, collection, _, _ = repository
+    assert asyncio.run(repo.soft_delete_for_session(SESSION_ID.upper(), DELETED_AT)) == 2
+    collection.update_many.assert_awaited_once_with(
+        {"session_id": ObjectId(SESSION_ID), "deleted_at": None},
+        {"$set": {"deleted_at": DELETED_AT}},
+        upsert=False,
+    )
+    # Soft delete never removes a document.
+    assert collection.delete_one.mock_calls == []
+    assert collection.delete_many.mock_calls == []
+
+
+@pytest.mark.parametrize(
+    "session_id",
+    ["", "not-an-object-id", SESSION_ID + "00", None, 1, ObjectId(SESSION_ID), bytes.fromhex(SESSION_ID)],
+)
+def test_soft_delete_with_a_malformed_identifier_stamps_nothing(repository, session_id):
+    repo, collection, _, _ = repository
+    assert asyncio.run(repo.soft_delete_for_session(session_id, DELETED_AT)) == 0
+    collection.update_many.assert_not_awaited()
+
+
+def test_soft_delete_failures_are_sanitized(repository):
+    repo, collection, _, _ = repository
+    collection.update_many.side_effect = OperationFailure("sensitive database details")
+    error = expect_error(
+        ErrorCode.INTERNAL_ERROR,
+        lambda: asyncio.run(repo.soft_delete_for_session(SESSION_ID, DELETED_AT)),
+    )
+    assert error.__cause__ is None and error.__suppress_context__
 
 
 def test_list_preserves_order_and_maps_every_document(repository):

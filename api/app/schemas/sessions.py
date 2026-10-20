@@ -76,7 +76,26 @@ class SessionSummaryResponse(SessionIdResponse):
 
 class SessionDetailResponse(SessionSummaryResponse):
     metadata: dict[str, Any]
+    deleted_at: AwareDatetime | None
     runs: list[RunResponse]
+
+    @field_serializer("deleted_at", when_used="json")
+    def serialize_deleted_at(self, value: datetime | None) -> str | None:
+        return None if value is None else format_timestamp(value)
+
+
+class SessionBulkDeleteRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, hide_input_in_errors=True)
+
+    session_ids: list[str] = Field(min_length=1)
+
+
+class SessionBulkDeleteResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    deleted: list[str]
+    already_deleted: list[str]
+    not_found: list[str]
 
 
 class SessionProjectionResponse(SessionIdResponse):
